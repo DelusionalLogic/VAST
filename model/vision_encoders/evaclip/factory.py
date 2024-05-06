@@ -3,20 +3,55 @@ import logging
 import os
 import pathlib
 import re
-from copy import deepcopy
-from pathlib import Path
-from typing import Optional, Tuple, Union, Dict, Any
+from copy import (
+    deepcopy
+)
+from pathlib import (
+    Path
+)
+from typing import (
+    Any,
+    Dict,
+    Optional,
+    Tuple,
+    Union
+)
+
 import torch
 
-from .constants import OPENAI_DATASET_MEAN, OPENAI_DATASET_STD
-from .model import CLIP, CustomCLIP, convert_weights_to_lp, convert_to_custom_text_state_dict,\
+from .constants import (
+    OPENAI_DATASET_MEAN,
+    OPENAI_DATASET_STD
+)
+from .model import (
+    CLIP,
+    CustomCLIP,
+    convert_to_custom_text_state_dict,
+    convert_weights_to_lp,
     get_cast_dtype
-from .openai import load_openai_model
-from .pretrained import is_pretrained_cfg, get_pretrained_cfg, download_pretrained, list_pretrained_tags_by_model
-from .transform import image_transform
-from .tokenizer import HFTokenizer, tokenize
-from .utils import resize_clip_pos_embed, resize_evaclip_pos_embed, resize_visual_pos_embed, resize_eva_pos_embed
-
+)
+from .openai import (
+    load_openai_model
+)
+from .pretrained import (
+    download_pretrained,
+    get_pretrained_cfg,
+    is_pretrained_cfg,
+    list_pretrained_tags_by_model
+)
+from .tokenizer import (
+    HFTokenizer,
+    tokenize
+)
+from .transform import (
+    image_transform
+)
+from .utils import (
+    resize_clip_pos_embed,
+    resize_eva_pos_embed,
+    resize_evaclip_pos_embed,
+    resize_visual_pos_embed
+)
 
 _MODEL_CONFIG_PATHS = [Path(__file__).parent / f"model_configs/"]
 _MODEL_CONFIGS = {}  # directory (model_name: config) of model architecture configs
@@ -213,149 +248,36 @@ def create_model(
         pretrained: Optional[str] = None,
         precision: str = 'fp32',
         device: Union[str, torch.device] = 'cpu',
-        jit: bool = False,
-        force_quick_gelu: bool = False,
-        force_custom_clip: bool = False,
-        force_patch_dropout: Optional[float] = None,
-        pretrained_image: str = '',
-        pretrained_text: str = '',
-        pretrained_hf: bool = True,
-        pretrained_visual_model: str = None,
-        pretrained_text_model: str = None,
         cache_dir: Optional[str] = None,
-        skip_list: list  = [],
         image_size = None
 ):
     model_name = model_name.replace('/', '-')  # for callers using old naming with / in ViT names
     if isinstance(device, str):
         device = torch.device(device)
 
-    if pretrained and pretrained.lower() == 'openai':
-        logging.info(f'Loading pretrained {model_name} from OpenAI.')
-        model = load_openai_model(
-            model_name,
-            precision=precision,
-            device=device,
-            jit=jit,
-            cache_dir=cache_dir,
-        )
-    else:
-        model_cfg = get_model_config(model_name)
-        if model_cfg is not None:
-            logging.info(f'Loaded {model_name} model config.')
-        else:
-            logging.error(f'Model config for {model_name} not found; available models {list_models()}.')
-            raise RuntimeError(f'Model config for {model_name} not found.')
+    model_cfg = get_model_config(model_name)
+    assert model_cfg is not None
+    logging.info(f'Loaded {model_name} model config.')
 
-        if image_size is  not None:
-            model_cfg['vision_cfg']['image_size'] = image_size
+    if image_size is not None:
+        model_cfg['vision_cfg']['image_size'] = image_size
 
+    os.environ['RoPE'] = "0"
 
-        if 'rope' in model_cfg.get('vision_cfg', {}):
-            if model_cfg['vision_cfg']['rope']:
-                os.environ['RoPE'] = "1"
-        else:
-            os.environ['RoPE'] = "0"
+    cast_dtype = get_cast_dtype(precision)
 
-        if force_quick_gelu:
-            # override for use of QuickGELU on non-OpenAI transformer models
-            model_cfg["quick_gelu"] = True
-        
-        if force_patch_dropout is not None:
-            # override the default patch dropout value
-            model_cfg['vision_cfg']["patch_dropout"] = force_patch_dropout
+    model = CustomCLIP(**model_cfg, cast_dtype=cast_dtype)
 
-        cast_dtype = get_cast_dtype(precision)
-        custom_clip = model_cfg.pop('custom_text', False) or force_custom_clip or ('hf_model_name' in model_cfg['text_cfg'])
+    checkpoint_path = ''
+    checkpoint_path = pretrained
 
-    
-        if custom_clip:
-            if 'hf_model_name' in model_cfg.get('text_cfg', {}):
-                model_cfg['text_cfg']['hf_model_pretrained'] = pretrained_hf
-            model = CustomCLIP(**model_cfg, cast_dtype=cast_dtype)
-        else:
-            model = CLIP(**model_cfg, cast_dtype=cast_dtype)
-
-        pretrained_cfg = {}
-        if pretrained:
-            checkpoint_path = ''
-            pretrained_cfg = get_pretrained_cfg(model_name, pretrained)
-            if pretrained_cfg:
-                checkpoint_path = download_pretrained(pretrained_cfg, cache_dir=cache_dir)
-            elif os.path.exists(pretrained):
-                checkpoint_path = pretrained
-
-            if checkpoint_path:
-                logging.info(f'Loading pretrained {model_name} weights ({pretrained}).')
-                load_checkpoint(model,
-                               checkpoint_path,
-                               model_key="model|module|state_dict",
-                               strict=False
-                               ) 
-            else:
-                error_str = (
-                    f'Pretrained weights ({pretrained}) not found for model {model_name}.'
-                    f'Available pretrained tags ({list_pretrained_tags_by_model(model_name)}.')
-                logging.warning(error_str)
-                raise RuntimeError(error_str)
-        else:
-            visual_checkpoint_path = ''
-            text_checkpoint_path = ''
-            
-            if pretrained_image:
-                pretrained_visual_model = pretrained_visual_model.replace('/', '-')  # for callers using old naming with / in ViT names
-                pretrained_image_cfg = get_pretrained_cfg(pretrained_visual_model, pretrained_image)
-                if 'timm_model_name' in model_cfg.get('vision_cfg', {}):
-                    # pretrained weight loading for timm models set via vision_cfg
-                    model_cfg['vision_cfg']['timm_model_pretrained'] = True
-                elif pretrained_image_cfg:
-                    visual_checkpoint_path = download_pretrained(pretrained_image_cfg, cache_dir=cache_dir)
-                elif os.path.exists(pretrained_image):
-                    visual_checkpoint_path = pretrained_image
-                else:
-                    logging.warning(f'Pretrained weights ({visual_checkpoint_path}) not found for model {model_name}.visual.')
-                    raise RuntimeError(f'Pretrained weights ({visual_checkpoint_path}) not found for model {model_name}.visual.')
-
-            if pretrained_text:
-                pretrained_text_model = pretrained_text_model.replace('/', '-')  # for callers using old naming with / in ViT names
-                pretrained_text_cfg = get_pretrained_cfg(pretrained_text_model, pretrained_text)
-                if pretrained_image_cfg:
-                    text_checkpoint_path = download_pretrained(pretrained_text_cfg, cache_dir=cache_dir)
-                elif os.path.exists(pretrained_text):
-                    text_checkpoint_path = pretrained_text
-                else:
-                    logging.warning(f'Pretrained weights ({text_checkpoint_path}) not found for model {model_name}.text.')
-                    raise RuntimeError(f'Pretrained weights ({text_checkpoint_path}) not found for model {model_name}.text.')
-            
-            if visual_checkpoint_path:
-                logging.info(f'Loading pretrained {model_name}.visual weights ({visual_checkpoint_path}).')
-            if text_checkpoint_path:
-                logging.info(f'Loading pretrained {model_name}.text weights ({text_checkpoint_path}).')
-
-            if visual_checkpoint_path or text_checkpoint_path:
-                load_pretrained_checkpoint(
-                    model,
-                    visual_checkpoint_path,
-                    text_checkpoint_path,
-                    strict=False,
-                    visual_model=pretrained_visual_model,
-                    text_model=pretrained_text_model,
-                    model_key="model|module|state_dict",
-                    skip_list=skip_list
-                )
-        
-        if "fp16" in precision or "bf16" in precision:
-            logging.info(f'convert precision to {precision}')
-            model = model.to(torch.bfloat16) if 'bf16' in precision else model.to(torch.float16)
-
-        model.to(device=device)
-
-        # set image / mean metadata from pretrained_cfg if available, or use default
-        model.visual.image_mean = pretrained_cfg.get('mean', None) or OPENAI_DATASET_MEAN
-        model.visual.image_std = pretrained_cfg.get('std', None) or OPENAI_DATASET_STD
-
-        if jit:
-            model = torch.jit.script(model)
+    logging.info(f'Loading pretrained {model_name} weights ({pretrained}).')
+    load_checkpoint(
+        model,
+        checkpoint_path,
+        model_key="model|module|state_dict",
+        strict=False
+    ) 
 
     return model
 

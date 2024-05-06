@@ -1,12 +1,17 @@
 import math
-import torch
 import random
-import torch.nn as nn
+
 import numpy as np
+import torch
+import torch.nn as nn
 import torch.nn.functional as F
 from easydict import EasyDict as edict
 from torch.nn import LayerNorm as LayerNorm
-from utils.logger import LOGGER
+
+from utils.logger import (
+    LOGGER
+)
+
 
 def gelu(x):
     """Implementation of the gelu activation function.
@@ -102,93 +107,6 @@ class TokenMasker(nn.Module):
 class MMGeneralModule(nn.Module):
     def __init__(self):
         super().__init__()
-      
-    
-
-
-
-    def modify_checkpoint(self, checkpoint):
-        new_ckpt = {}
-        for k,v in checkpoint.items():
-            if 'video' in k:
-                new_ckpt[k.replace('video','vision')]=v
-            elif 'evaclip_model' in k:
-                new_ckpt[k.replace('evaclip_model','vision_encoder')]=v
-            elif 'clip_model' in k:    
-                new_ckpt[k.replace('clip_model','vision_encoder')]=v
-            else:
-                new_ckpt[k] = v.float()
-        
-        checkpoint = new_ckpt
-
-    
-        if self.config.frame_embedding_type == 'adaptive':
-
-            if 'vision_frame_embedding' in checkpoint:
-                pretrain_embed = checkpoint['vision_frame_embedding']
-                if pretrain_embed.shape[1]!=self.config.max_vision_sample_num:
-                    pretrain_embed = F.interpolate(pretrain_embed.permute(0,2,1),self.config.max_vision_sample_num,mode='nearest').permute(0,2,1)
-                    checkpoint['vision_frame_embedding'] = pretrain_embed
-
-            else:
-                    
-                pretrain_embed = checkpoint['vision_perceiver.vision_frame_embedding']
-                if pretrain_embed.shape[1]!=self.config.max_vision_sample_num:
-                    pretrain_embed = F.interpolate(pretrain_embed.permute(0,2,1),self.config.max_vision_sample_num,mode='nearest').permute(0,2,1)
-                    checkpoint['vision_perceiver.vision_frame_embedding'] = pretrain_embed
-
-            if 'audio_frame_embedding' in checkpoint:
-                pretrain_embed_a = checkpoint['audio_frame_embedding']
-                if pretrain_embed_a.shape[1]!=self.config.max_audio_sample_num:
-                    pretrain_embed_a = F.interpolate(pretrain_embed_a.permute(0,2,1),self.config.max_audio_sample_num,mode='nearest').permute(0,2,1)
-                    checkpoint['audio_frame_embedding'] = pretrain_embed_a
-
-        # if self.config.vision_resolution != pretrain_cfg['vision_resolution']:
-        if self.config.vision_encoder_type.startswith('clip'):
-            vision_width = checkpoint["vision_encoder.visual.positional_embedding"].shape[1]
-            vision_layers = len([k for k in checkpoint.keys() if k.startswith("visual.") and k.endswith(".attn.in_proj_weight")])
-            vision_patch_size = checkpoint["vision_encoder.visual.conv1.weight"].shape[-1]
-            
-            grid_size = round((checkpoint["vision_encoder.visual.positional_embedding"].shape[0] - 1) ** 0.5)
-       
-            src  = checkpoint["vision_encoder.visual.positional_embedding"]
-            src_cls = src[0:1]
-            src_oth = src[1:]
-            new_grid_size = self.config.vision_resolution // vision_patch_size
-            if new_grid_size!=grid_size:
-                src_oth = F.interpolate(src_oth.reshape(grid_size,grid_size,vision_width).permute(2,0,1).unsqueeze(0),(new_grid_size,new_grid_size),mode='bilinear')
-                src_oth = src_oth[0].permute(1,2,0).reshape(-1,src.shape[-1])
-                tgt = torch.cat((src_cls,src_oth),dim=0)
-                checkpoint["vision_encoder.visual.positional_embedding"] = tgt
-
-        elif self.config.vision_encoder_type.startswith('evaclip'):
-
-            vision_width = checkpoint["vision_encoder.visual.pos_embed"].shape[2]
-            vision_layers = len([k for k in checkpoint.keys() if k.startswith("visual.") and k.endswith(".attn.in_proj_weight")])
-
-            vision_patch_size = checkpoint["vision_encoder.visual.patch_embed.proj.weight"].shape[-1]
-            
-            grid_size = round((checkpoint["vision_encoder.visual.pos_embed"].shape[1] - 1) ** 0.5)
-     
-            src  = checkpoint["vision_encoder.visual.pos_embed"][0]
-            src_cls = src[0:1]
-            src_oth = src[1:]
-            new_grid_size = self.config.vision_resolution // vision_patch_size
-            if new_grid_size!=grid_size:
-                src_oth = F.interpolate(src_oth.reshape(grid_size,grid_size,vision_width).permute(2,0,1).unsqueeze(0),(new_grid_size,new_grid_size),mode='bilinear')
-                src_oth = src_oth[0].permute(1,2,0).reshape(-1,src.shape[-1])
-                tgt = torch.cat((src_cls,src_oth),dim=0)
-                checkpoint["vision_encoder.visual.pos_embed"] = tgt.unsqueeze(0)
-
-
-
-        else:
-            pass
-        
-
-     
-        return checkpoint
-
 
     def construct_vision_encoder(self):
         ##### construct vision encoder 
@@ -228,7 +146,9 @@ class MMGeneralModule(nn.Module):
     
 
     def load_videoswin_model(self):
-        from .vision_encoders.videoswin.videoswin import SwinTransformer3D
+        from .vision_encoders.videoswin.videoswin import (
+            SwinTransformer3D
+        )
         assert self.config.vision_encoder_type == 'videoswin_base_k600_22k'
         time_stride = 1
         self.vision_encoder = SwinTransformer3D(time_stride = 1, embed_dim=128, num_heads=[4, 8, 16, 32],checkpointing=self.config.checkpointing)
@@ -244,7 +164,10 @@ class MMGeneralModule(nn.Module):
 
     def load_beats_model(self):
 
-        from .audio_encoders.beats.beats import  BEATsConfig, BEATs
+        from .audio_encoders.beats.beats import (
+            BEATs,
+            BEATsConfig
+        )
         checkpoint = torch.load('./pretrained_weights/beats/BEATs_iter3_plus_AS2M.pt')
         cfg = BEATsConfig(checkpoint['cfg'])
 
@@ -266,7 +189,10 @@ class MMGeneralModule(nn.Module):
         cfg.checkpointing = self.config.checkpointing
         cfg.audio_melbins = self.config.audio_melbins
         cfg.audio_target_length = self.config.audio_target_length
-        from  .audio_encoders.ast.ast import  TransformerEncoder, AudioEmbeddings  
+        from .audio_encoders.ast.ast import (
+            AudioEmbeddings,
+            TransformerEncoder
+        )  
         self.audio_embeddings = AudioEmbeddings(cfg)
         self.audio_encoder = TransformerEncoder(cfg, mode='prenorm')
         self.audio_dim = 768
@@ -321,7 +247,9 @@ class MMGeneralModule(nn.Module):
 
 
         if self.config.vision_encoder_type.startswith('evaclip'):
-            from .vision_encoders.evaclip import create_model
+            from .vision_encoders.evaclip import (
+                create_model
+            )
             if  self.config.vision_encoder_type == 'evaclip02_base':
                 model_name = "EVA02-CLIP-B-16" 
                 pretrained = "./pretrained_weights/clip/EVA02_CLIP_B_psz16_s8B.pt" 
@@ -356,8 +284,10 @@ class MMGeneralModule(nn.Module):
         else:
             ### openai clip
 
-            from .vision_encoders.clip.clip import build_model
-            from .vision_encoders.clip.clip import Transformer
+            from .vision_encoders.clip.clip import (
+                Transformer,
+                build_model
+            )
             if  self.config.vision_encoder_type == 'clip_vit_base_16':
                 clip_weight = torch.jit.load('./pretrained_weights/clip/ViT-B-16.pt', map_location='cpu')
                 self.vision_dim = 768
@@ -526,8 +456,12 @@ class MMGeneralModule(nn.Module):
 
 
     def load_swin_model(self):
-        from .vision_encoders.swin.swin import SwinTransformer
-        from .vision_encoders.swin.swin_config import get_config
+        from .vision_encoders.swin.swin import (
+            SwinTransformer
+        )
+        from .vision_encoders.swin.swin_config import (
+            get_config
+        )
 
         if self.config.vision_encoder_type.startswith('swin_base_22k_224'):
             swin_config = get_config('./pretrained_weights/swin/swin_base_patch4_window7_224_22k.yaml')

@@ -8,17 +8,22 @@
 # --------------------------------------------------------
 
 
+import logging
+from typing import (
+    Optional,
+)
+
 import torch
 import torch.nn as nn
-from torch.nn import LayerNorm
 import torchaudio.compliance.kaldi as ta_kaldi
+from torch.nn import (
+    LayerNorm,
+)
 
 # from backbone import (
 #     TransformerEncoder,
 # )
 
-import logging
-from typing import Optional
 
 logger = logging.getLogger(__name__)
 
@@ -34,12 +39,25 @@ logger = logging.getLogger(__name__)
 # --------------------------------------------------------
 
 import math
+import warnings
+from typing import (
+    Dict,
+    Optional,
+    Tuple,
+)
+
 import numpy as np
-from typing import Dict, Optional, Tuple
 import torch
-from torch import Tensor, nn
 import torch.nn.functional as F
-from torch.nn import LayerNorm, Parameter
+from torch import (
+    Tensor,
+    nn,
+)
+from torch.nn import (
+    LayerNorm,
+    Parameter,
+)
+
 # from modules import (
 #     GradMultiply,
 #     SamePad,
@@ -58,11 +76,6 @@ from torch.nn import LayerNorm, Parameter
 # https://github.com/pytorch/fairseq
 # --------------------------------------------------------
 
-import math
-import warnings
-import torch
-from torch import Tensor, nn
-import torch.nn.functional as F
 
 
 class GradMultiply(torch.autograd.Function):
@@ -1037,8 +1050,8 @@ def init_bert_params(module):
         normal_(module.v_proj.weight.data)
 
 class BEATsConfig:
-    def __init__(self, cfg=None):
-        self.input_patch_size: int = -1  # path size of patch embedding
+    def __init__(self):
+        self.input_patch_size: int = 16  # path size of patch embedding
         self.embed_dim: int = 512  # patch embedding dimension
         self.conv_bias: bool = False  # include bias in conv encoder
 
@@ -1050,35 +1063,29 @@ class BEATsConfig:
 
         self.layer_wise_gradient_decay_ratio: float = 1.0  # ratio for layer-wise gradient decay
         self.layer_norm_first: bool = False  # apply layernorm first in the transformer
-        self.deep_norm: bool = False  # apply deep_norm first in the transformer
+        self.deep_norm: bool = True  # apply deep_norm first in the transformer
 
         # dropouts
         self.dropout: float = 0.1  # dropout probability for the transformer
         self.attention_dropout: float = 0.1  # dropout probability for attention weights
         self.activation_dropout: float = 0.0  # dropout probability after activation in FFN
-        self.encoder_layerdrop: float = 0.0  # probability of dropping a tarnsformer layer
-        self.dropout_input: float = 0.0  # dropout to apply to the input (after feat extr)
+        self.encoder_layerdrop: float = 0.05  # probability of dropping a tarnsformer layer
+        self.dropout_input: float = 0.1  # dropout to apply to the input (after feat extr)
 
         # positional embeddings
         self.conv_pos: int = 128  # number of filters for convolutional positional embeddings
         self.conv_pos_groups: int = 16  # number of groups for convolutional positional embedding
 
         # relative position embedding
-        self.relative_position_embedding: bool = False  # apply relative position embedding
+        self.relative_position_embedding: bool = True  # apply relative position embedding
         self.num_buckets: int = 320  # number of buckets for relative position embedding
-        self.max_distance: int = 1280  # maximum distance for relative position embedding
-        self.gru_rel_pos: bool = False  # apply gated relative position embedding
+        self.max_distance: int = 800  # maximum distance for relative position embedding
+        self.gru_rel_pos: bool = True  # apply gated relative position embedding
 
         # label predictor
         self.finetuned_model: bool = False  # whether the model is a fine-tuned model.
         self.predictor_dropout: float = 0.1  # dropout probability for the predictor
         self.predictor_class: int = 527  # target class number for the predictor
-
-        if cfg is not None:
-            self.update(cfg)
-
-    def update(self, cfg: dict):
-        self.__dict__.update(cfg)
 
 
 class BEATs(nn.Module):

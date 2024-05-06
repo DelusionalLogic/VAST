@@ -1,66 +1,25 @@
 import os
+
 import torch
-import torch.distributed as dist
 
-from model import model_registry
-from torch.nn.parallel import DistributedDataParallel as DDP
-from .logger import LOGGER
-from .build_optimizer import build_optimizer
+from model.vast import (
+    VAST
+)
 
-
-class DDP_modify(DDP):
-    def __getattr__(self, name):
-        try:
-            return super().__getattr__(name)
-        except:
-            return getattr(self.module,name)
+from .logger import (
+    LOGGER
+)
 
 
 def build_model(args):
+    assert args.run_cfg.checkpoint
 
-    model = model_registry[args.model_cfg.model_type](args.model_cfg)
-    checkpoint = {}
-    
-    ### load ckpt from a pretrained_dir
-    if args.run_cfg.pretrain_dir:
-        checkpoint = load_from_pretrained_dir(args)
-        LOGGER.info("Load from pretrained dir {}".format(args.run_cfg.pretrain_dir))
+    model = VAST(args.model_cfg)
+    checkpoint = torch.load(args.run_cfg.checkpoint)
+    model.load_state_dict(checkpoint)
+    model.to(gpu)
 
-    ### load ckpt from specific path
-    if args.run_cfg.checkpoint:
-        checkpoint =  torch.load(args.run_cfg.checkpoint, map_location = 'cpu')
-
-    ### resume training
-    if args.run_cfg.resume:
-        checkpoint, checkpoint_optim, start_step = load_from_resume(args.run_cfg)
-    else:
-        checkpoint_optim, start_step = None , 0
-
-
-    checkpoint = {k.replace('module.',''):v for k,v in checkpoint.items()}
-    
-    if checkpoint != {}:
-
-        checkpoint = model.modify_checkpoint(checkpoint)
-        if "model" in checkpoint.keys():
-            checkpoint = checkpoint["model"]
-
-        missing_keys,unexpected_keys = model.load_state_dict(checkpoint,strict=False)
-        LOGGER.info(f"Unexpected keys {unexpected_keys}")
-        LOGGER.info(f"missing_keys  {missing_keys}")
-     
-
-    local_rank = args.local_rank
-    device = torch.device("cuda", local_rank)
-    model.to(device)
-    if  args.run_cfg.use_ddp:
-        model = DDP_modify(model, device_ids=[local_rank], output_device=local_rank, find_unused_parameters=True)
-    else:
-        pass
-
-    return model, checkpoint_optim, start_step
-
-
+    return model, None, 0
 
 def load_from_pretrained_dir(args):
 

@@ -8,8 +8,8 @@ import numpy as np
 from multiprocessing import Pool
 
 
-input_path = '/public/chensihan/datasets/tgif/gifs_used'
-output_path = '/public/chensihan/datasets/tgif/'
+input_path = 'datasets/srcdata/msrvtt/videos'
+output_path = 'datasets/srcdata/msrvtt/'
 
 data_list = os.listdir(input_path)
 
@@ -26,10 +26,10 @@ def pipline(video_path, video_probe, output_dir, fps, sr, duration_target):
 
 
     # extract video frames fps
-    fps_frame_dir = os.path.join(output_dir, f"frames_fps{fps}", video_name)
-    os.makedirs(fps_frame_dir, exist_ok=True)
-    cmd = "ffmpeg -loglevel error -i {} -vsync 0 -f image2 -vf fps=fps={:.02f} -qscale:v 2 {}/frame_%04d.jpg".format(
-              video_path, fps, fps_frame_dir)
+    #fps_frame_dir = os.path.join(output_dir, f"frames_fps{fps}", video_name)
+    #os.makedirs(fps_frame_dir, exist_ok=True)
+    #cmd = "ffmpeg -loglevel error -i {} -vsync 0 -f image2 -vf fps=fps={:.02f} -qscale:v 2 {}/frame_%04d.jpg".format(
+    #          video_path, fps, fps_frame_dir)
 
     ## extract fixed number frames
     # fps_frame_dir = os.path.join(output_dir, f"frames_32", video_name)
@@ -38,12 +38,12 @@ def pipline(video_path, video_probe, output_dir, fps, sr, duration_target):
     #           video_path,  fps_frame_dir)
   
 
-    # ## extract audios
-    # sr_audio_dir = os.path.join(output_dir,f"audios")
-    # os.makedirs(sr_audio_dir, exist_ok=True)
-    # # print(sr_audio_dir)
-    # audio_name = video_name+'.wav'
-    # audio_file_path = os.path.join(sr_audio_dir, audio_name)
+    ## extract audios
+    sr_audio_dir = os.path.join(output_dir,f"audios")
+    os.makedirs(sr_audio_dir, exist_ok=True)
+    # print(sr_audio_dir)
+    audio_name = video_name+'.wav'
+    audio_file_path = os.path.join(sr_audio_dir, audio_name)
 
 
     cmd = "ffmpeg -i {} -loglevel error -f wav -vn -ac 1 -ab 16k -ar {} -y {}".format(

@@ -1,17 +1,43 @@
 import os
-import torch 
+# from apex import amp
+from collections import (
+    defaultdict
+)
+
+import torch
 import torch.distributed as dist
 import torch.nn.functional as F
-from tqdm import tqdm 
-# from apex import amp
-from collections import defaultdict
-from torch.nn.utils import clip_grad_norm_
-from evaluation import evaluation_registry
-from .save import ModelSaver
-from .tool import NoOp
-from .logger import LOGGER, RunningMeter
-from .sched import get_lr_sched
-from torch.cuda.amp import autocast, GradScaler
+from torch.cuda.amp import (
+    GradScaler,
+    autocast
+)
+from torch.nn.utils import (
+    clip_grad_norm_
+)
+from tqdm import (
+    tqdm
+)
+
+from evaluation import (
+    evaluation_registry
+)
+from evaluation.evaluation_mm import (
+    evaluate_mm
+)
+
+from .logger import (
+    LOGGER,
+    RunningMeter
+)
+from .save import (
+    ModelSaver
+)
+from .sched import (
+    get_lr_sched
+)
+from .tool import (
+    NoOp
+)
 
 
 def train(model, optimizer, train_loader, val_loaders, run_cfg, start_step=0, verbose_time=False):
@@ -149,22 +175,6 @@ def train(model, optimizer, train_loader, val_loaders, run_cfg, start_step=0, ve
 
     
   
-def test(model, test_loader, run_cfg):
-    
-    evaluate_fn = evaluation_registry[model.config.evaluation_type]
-    eval_log = evaluate_fn(model, test_loader, run_cfg, global_step=0)
-    if dist.get_rank()==0:  
-        for task_name, val_log in eval_log.items():
-            for eval_name, metric in val_log.items():
-                eval_name = task_name +'_' +eval_name 
-                # TB_LOGGER.log_scaler_dict({f"eval/{eval_name}/test_{k}": v
-                #                 for k, v in metric.items() if not isinstance(v,str)})
-                LOGGER.info(f"==== evaluation--{eval_name}========\n")
-                LOGGER.info(metric)
-
-
-
-
 def get_best_name(eval_name, metric):
     if eval_name.startswith('cap'):
         return 'CIDEr'

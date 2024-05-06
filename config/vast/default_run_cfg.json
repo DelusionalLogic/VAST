@@ -25,7 +25,7 @@
 "save_best":false,
 "pin_mem":true,
 "vision_resolution":224,
-"use_ddp":true,
+"use_ddp":false,
 "mode":"training",
 "log_steps":100
 }
