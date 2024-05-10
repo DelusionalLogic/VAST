@@ -9,7 +9,7 @@ output_dir=./output/vast/$config_name
 python3 -m torch.distributed.launch \
 --nnodes 1 \
 --node_rank 0 \
---nproc_per_node 8 \
+--nproc_per_node 1 \
 --master_port 9834 \
 ./run.py \
 --learning_rate 2e-5 \
@@ -18,7 +18,9 @@ python3 -m torch.distributed.launch \
 --save_best true \
 --config ./config/vast/finetune_cfg/retrieval-msrvtt.json \
 --pretrain_dir $output_dir \
---output_dir $output_dir/downstream/retrieval-msrvtt \
+--output_dir $output_dir/validation \
+--mode 'testing' \
+--checkpoint "$output_dir/downstream/retrieval-msrvtt/ckpt/best_ret%tvas--msrvtt_ret_ret_itc_tvas.pt" \
 
 
 

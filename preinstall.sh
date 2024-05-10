@@ -1,6 +1,3 @@
-pip install torch==2.0.1 -i https://pypi.tuna.tsinghua.edu.cn/simple
-pip install torchvision==0.15.2 -i https://pypi.tuna.tsinghua.edu.cn/simple
-pip install torchaudio==2.0.2 -i https://pypi.tuna.tsinghua.edu.cn/simple
 pip install decord -i https://pypi.tuna.tsinghua.edu.cn/simple
 pip install h5py -i https://pypi.tuna.tsinghua.edu.cn/simple
 pip install ffmpeg-python -i https://pypi.tuna.tsinghua.edu.cn/simple

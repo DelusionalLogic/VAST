@@ -1,14 +1,121 @@
+import math
+from functools import (
+    partial,
+)
+
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from easydict import EasyDict as edict
-from torch.nn import LayerNorm as LayerNorm
+from torch.utils.checkpoint import (
+    checkpoint,
+)
+
+from model.vision_encoders.evaclip.eva_vit_model import (
+    Block,
+    PatchEmbed,
+    trunc_normal_,
+)
 
 from .general_module import (
     Contra_head,
     Match_head,
 )
 
+
+class EVAVisionTransformer(nn.Module):
+    """ Vision Transformer with support for patch or hybrid CNN input stage
+    """
+    def __init__(self, img_size, patch_size=16, in_chans=3, embed_dim=768, depth=12,
+                 num_heads=12, mlp_ratio=4., qkv_bias=False, qk_scale=None, drop_rate=0., attn_drop_rate=0.,
+                 drop_path_rate=0., norm_layer=nn.LayerNorm, init_values=None, patch_dropout=0.,
+                 use_abs_pos_emb=True, use_rel_pos_bias=False, use_shared_rel_pos_bias=False, rope=False,
+                 use_mean_pooling=True, init_scale=0.001, grad_checkpointing=False, xattn=False, postnorm=False,
+                 pt_hw_seq_len=16, intp_freq=False, naiveswiglu=False, subln=False):
+        super().__init__()
+        self.image_size = img_size
+        self.num_classes = 1024
+        self.num_features = self.embed_dim = embed_dim  # num_features for consistency with other models
+
+        self.patch_embed = PatchEmbed(img_size=img_size, patch_size=patch_size, in_chans=in_chans, embed_dim=embed_dim)
+        num_patches = self.patch_embed.num_patches
+
+        self.cls_token = nn.Parameter(torch.zeros(1, 1, embed_dim))
+        # self.mask_token = nn.Parameter(torch.zeros(1, 1, embed_dim))
+        assert use_abs_pos_emb
+        self.pos_embed = nn.Parameter(torch.zeros(1, num_patches + 1, embed_dim))
+        self.pos_drop = nn.Dropout(p=drop_rate)
+
+        dpr = [x.item() for x in torch.linspace(0, drop_path_rate, depth)]  # stochastic depth decay rule
+        self.blocks = nn.ModuleList([
+            Block(
+                dim=embed_dim, num_heads=num_heads, mlp_ratio=mlp_ratio, qkv_bias=qkv_bias, qk_scale=qk_scale,
+                drop=drop_rate, attn_drop=attn_drop_rate, drop_path=dpr[i], norm_layer=norm_layer,
+                init_values=init_values,
+                xattn=xattn, postnorm=postnorm, subln=subln)
+            for i in range(depth)])
+        self.norm = nn.Identity() if use_mean_pooling else norm_layer(embed_dim)
+        self.fc_norm = norm_layer(embed_dim) if use_mean_pooling else None
+        self.head = nn.Linear(embed_dim, self.num_classes)
+        trunc_normal_(self.head.weight, std=.02)
+        self.head.weight.data.mul_(init_scale)
+        self.head.bias.data.mul_(init_scale)
+
+        trunc_normal_(self.pos_embed, std=.02)
+
+        trunc_normal_(self.cls_token, std=.02)
+        # trunc_normal_(self.mask_token, std=.02)
+
+    def forward_features(self, x):
+        x = self.patch_embed(x)
+        batch_size, _, _ = x.size()
+
+        cls_tokens = self.cls_token.expand(batch_size, -1, -1)  # stole cls_tokens impl from Phil Wang, thanks
+        x = torch.cat((cls_tokens, x), dim=1)
+        if self.pos_embed is not None:
+            x = x + self.pos_embed
+        x = self.pos_drop(x)
+
+        for blk in self.blocks:
+            x = blk(x, rel_pos_bias=None)
+
+        x = self.norm(x)
+        return x
+
+    def forward(self, x, return_all_features=True):
+        return self.forward_features(x)
+
+class CustomCLIP(nn.Module):
+    def __init__(self, image_size):
+        super().__init__()
+
+        self.visual = EVAVisionTransformer(
+            img_size=image_size,
+            patch_size=14,
+            use_mean_pooling=False,
+            init_values=None,
+            patch_dropout=.0,
+            embed_dim=1408,
+            depth=40,
+            num_heads=16,
+            mlp_ratio=4.3637,
+            qkv_bias=True,
+            drop_path_rate=0.4,
+            norm_layer=partial(nn.LayerNorm, eps=1e-6),
+            xattn=True,
+            rope=False,
+            postnorm=False, pt_hw_seq_len=16,   # 224/14
+            intp_freq=False,
+            naiveswiglu=False,
+            subln=False
+        )
+
+        self.logit_scale = nn.Parameter(torch.ones([]) * np.log(1 / 0.07))
+
+    def encode_image(self, image):
+        features = self.visual(image)
+        return F.normalize(features, dim=-1)
 
 class VAST(nn.Module):
     """ VLP pretraining """
@@ -20,6 +127,7 @@ class VAST(nn.Module):
         self.load_beats_model()
         self.construct_multimodal_encoder()
 
+        # VAST
         contra_dim = self.config.contra_dim
         self.contra_head_t = Contra_head(self.multimodal_dim, contra_dim)
         self.contra_head_s = Contra_head(self.multimodal_dim, contra_dim)
@@ -32,9 +140,9 @@ class VAST(nn.Module):
         self.itm_head = Match_head(self.multimodal_dim)
         self.vision_frame_embedding = nn.Parameter(0.02 * torch.randn(1, self.config.max_vision_sample_num, self.multimodal_dim))
         self.audio_frame_embedding = nn.Parameter(0.02 * torch.randn(1, self.config.max_audio_sample_num, self.multimodal_dim))
-        self.hidden_trans_vision_multimodal = nn.Sequential(nn.Linear(self.vision_dim, self.multimodal_dim),LayerNorm(self.multimodal_dim, eps=1e-12))
-        self.hidden_trans_audio_multimodal = nn.Sequential(nn.Linear(self.audio_dim, self.multimodal_dim),LayerNorm(self.multimodal_dim, eps=1e-12))
-        self.hidden_trans_subtitle_multimodal = nn.Sequential(nn.Linear(self.multimodal_dim, self.multimodal_dim),LayerNorm(self.multimodal_dim, eps=1e-12))
+        self.hidden_trans_vision_multimodal = nn.Sequential(nn.Linear(self.vision_dim, self.multimodal_dim),nn.LayerNorm(self.multimodal_dim, eps=1e-12))
+        self.hidden_trans_audio_multimodal = nn.Sequential(nn.Linear(self.audio_dim, self.multimodal_dim),nn.LayerNorm(self.multimodal_dim, eps=1e-12))
+        self.hidden_trans_subtitle_multimodal = nn.Sequential(nn.Linear(self.multimodal_dim, self.multimodal_dim),nn.LayerNorm(self.multimodal_dim, eps=1e-12))
         self.vision_type_embeddings = nn.Parameter(0.02 * torch.randn(1, 1, self.multimodal_dim)) 
         self.audio_type_embeddings = nn.Parameter(0.02 * torch.randn(1, 1, self.multimodal_dim)) 
         self.subtitle_type_embeddings = nn.Parameter(0.02 * torch.randn(1, 1, self.multimodal_dim)) 
@@ -52,17 +160,14 @@ class VAST(nn.Module):
         cfg = BEATsConfig()
 
         self.audio_encoder = BEATs(cfg, checkpointing = self.config.checkpointing)
-        # self.audio_encoder.load_state_dict(checkpoint['model'])
         self.audio_dim = 768
 
     def load_clip_model(self):
-        from .vision_encoders.evaclip import (
-            create_model,
-        )
-        model_name = "EVA01-CLIP-g-14"
-        pretrained = "./pretrained_weights/clip/EVA01_CLIP_g_14_psz14_s11B.pt"
         self.vision_dim = 1408
-        self.vision_encoder = create_model(model_name, pretrained, image_size = self.config.vision_resolution)
+
+        self.vision_encoder = CustomCLIP(
+            image_size=self.config.vision_resolution,
+        )
 
     def pool_vision_for_contra(self, feature):
         # always use frame_avg for retrieval

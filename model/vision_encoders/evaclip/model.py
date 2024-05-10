@@ -3,23 +3,47 @@
 Adapted from https://github.com/openai/CLIP. Originally MIT License, Copyright (c) 2021 OpenAI.
 """
 import os
-from dataclasses import dataclass
-from typing import Optional, Tuple, Union
-from functools import partial
+from dataclasses import (
+    dataclass,
+)
+from functools import (
+    partial,
+)
+from typing import (
+    Optional,
+    Tuple,
+    Union,
+)
 
 import numpy as np
 import torch
 import torch.nn.functional as F
-from torch import nn
+from torch import (
+    nn,
+)
 
 try:
-    from .hf_model import HFTextEncoder
+    from .hf_model import (
+        HFTextEncoder,
+    )
 except:
     HFTextEncoder = None
-from .modified_resnet import ModifiedResNet
-from .timm_model import TimmModel
-from .eva_vit_model import EVAVisionTransformer
-from .transformer import LayerNorm, QuickGELU, Attention, VisionTransformer, TextTransformer
+from .eva_vit_model import (
+    EVAVisionTransformer,
+)
+from .modified_resnet import (
+    ModifiedResNet,
+)
+from .timm_model import (
+    TimmModel,
+)
+from .transformer import (
+    Attention,
+    LayerNorm,
+    QuickGELU,
+    TextTransformer,
+    VisionTransformer,
+)
 
 # try:
 #     from apex.normalization import FusedLayerNorm
@@ -280,8 +304,48 @@ class CustomCLIP(nn.Module):
             itm_task: bool = False,
     ):
         super().__init__()
-        self.visual = _build_vision_tower(embed_dim, vision_cfg, quick_gelu, cast_dtype)
-        self.text = _build_text_tower(embed_dim, text_cfg, quick_gelu, cast_dtype)
+        # self.visual = _build_vision_tower(embed_dim, vision_cfg, quick_gelu, cast_dtype)
+
+        vision_heads = vision_cfg.width // vision_cfg.head_width
+        self.visual = EVAVisionTransformer(
+            img_size=vision_cfg.image_size,
+            patch_size=vision_cfg.patch_size,
+            num_classes=embed_dim,
+            use_mean_pooling=vision_cfg.global_average_pool, #False
+            init_values=vision_cfg.ls_init_value,
+            patch_dropout=vision_cfg.patch_dropout,
+            embed_dim=vision_cfg.width,
+            depth=vision_cfg.layers,
+            num_heads=vision_heads,
+            mlp_ratio=vision_cfg.mlp_ratio,
+            qkv_bias=vision_cfg.qkv_bias,
+            drop_path_rate=vision_cfg.drop_path_rate,
+            # norm_layer= partial(FusedLayerNorm, eps=1e-6) if vision_cfg.fusedLN else partial(norm_layer, eps=1e-6),
+            norm_layer= partial(LayerNorm, eps=1e-6),
+            xattn=vision_cfg.xattn,
+            rope=vision_cfg.rope,
+            postnorm=vision_cfg.postnorm,
+            pt_hw_seq_len= vision_cfg.pt_hw_seq_len,   # 224/14
+            intp_freq= vision_cfg.intp_freq,
+            naiveswiglu= vision_cfg.naiveswiglu,
+            subln= vision_cfg.subln
+        )
+
+        self.text = TextTransformer(
+            context_length=text_cfg.context_length,
+            vocab_size=text_cfg.vocab_size,
+            width=text_cfg.width,
+            heads=text_cfg.heads,
+            layers=text_cfg.layers,
+            ls_init_value=text_cfg.ls_init_value,
+            output_dim=embed_dim,
+            act_layer=nn.GELU,
+            # norm_layer= FusedLayerNorm if text_cfg.fusedLN else norm_layer,
+            norm_layer= LayerNorm,
+            xattn=text_cfg.xattn,
+            attn_mask=text_cfg.attn_mask,
+        )
+
         self.logit_scale = nn.Parameter(torch.ones([]) * np.log(1 / 0.07))
 
     def lock_image_tower(self, unlocked_groups=0, freeze_bn_stats=False):

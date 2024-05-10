@@ -42,8 +42,8 @@ def main():
     checkpoint = torch.load(args.run_cfg.checkpoint)
     # checkpoint["position_ids"] = checkpoint["multimodal_encoder.bert.embeddings.position_ids"]
     # del checkpoint["multimodal_encoder.bert.embeddings.position_ids"]
-    # for k, v in checkpoint.items():
-    #     if k == ""
+    for k in [k for k in checkpoint if "vision_encoder.text" in k]:
+            del checkpoint[k]
     model.load_state_dict(checkpoint)
     model.to(gpu)
     model.eval()
