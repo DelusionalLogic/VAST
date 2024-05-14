@@ -6,6 +6,6 @@ pip install toolz -i https://pypi.tuna.tsinghua.edu.cn/simple
 pip install ipdb -i https://pypi.tuna.tsinghua.edu.cn/simple
 pip install einops -i https://pypi.tuna.tsinghua.edu.cn/simple
 pip install easydict -i https://pypi.tuna.tsinghua.edu.cn/simple
-pip install transformers==4.31.0 -i https://pypi.tuna.tsinghua.edu.cn/simple
+pip install transformers -i https://pypi.tuna.tsinghua.edu.cn/simple
 pip install webdataset -i https://pypi.tuna.tsinghua.edu.cn/simple
 pip install SentencePiece -i https://pypi.tuna.tsinghua.edu.cn/simple

@@ -7,9 +7,10 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from easydict import EasyDict as edict
-from torch.utils.checkpoint import (
-    checkpoint,
+from transformers import BertConfig as MainlineBertConfig
+from transformers import BertForMaskedLM as MainlineBertMasked
+from transformers import (
+    BertTokenizer,
 )
 
 from model.vision_encoders.evaclip.eva_vit_model import (
@@ -18,9 +19,19 @@ from model.vision_encoders.evaclip.eva_vit_model import (
     trunc_normal_,
 )
 
+from .audio_encoders.beats.beats import (
+    BEATs,
+    BEATsConfig,
+)
 from .general_module import (
     Contra_head,
     Match_head,
+)
+# For some reason using the upstream bert model here tanks the
+# inference quality. Maybe figure that out in the future
+from .text_encoders.bert.bert import (
+    BertConfig,
+    BertForMaskedLM,
 )
 
 
@@ -117,19 +128,78 @@ class CustomCLIP(nn.Module):
         features = self.visual(image)
         return F.normalize(features, dim=-1)
 
+class VastTextEncoder(nn.Module):
+    def __init__(self, config):
+        super().__init__()
+
+        self.config = config
+
+        bertconfig = BertConfig()
+        bertconfig.add_cross_attention = True
+        bertconfig.is_decoder = True
+        self.multimodal_encoder = BertForMaskedLM(bertconfig)
+
+        self.multimodal_encoder.tokenizer = BertTokenizer('./pretrained_weights/bert/bert-base-uncased/vocab.txt')
+
+        # VAST
+        self.contra_head_t = Contra_head(768, self.config.contra_dim)
+
+    def _caption_tokens(self, raw_captions):
+        caption_tokens = self.multimodal_encoder.tokenizer(
+            raw_captions,
+            padding="max_length",
+            truncation=True,
+            max_length=self.config.max_caption_len,
+            return_tensors="pt"
+        ).to(torch.device("cuda"))
+        return caption_tokens
+
+
+    def forward(self, raw_captions):
+        caption_tokens = self._caption_tokens(raw_captions)
+        input_ids = caption_tokens.input_ids
+        attention_mask = caption_tokens.attention_mask
+
+        caption_output = self.multimodal_encoder.bert(
+            input_ids = input_ids,
+            attention_mask = attention_mask,
+        ).last_hidden_state
+
+        caption_output_pooled = caption_output[:,0]
+        feat_t = self.contra_head_t(caption_output_pooled) 
+        feat_t = F.normalize(feat_t, dim=-1)
+        return feat_t
+
 class VAST(nn.Module):
     """ VLP pretraining """
     def __init__(self, config):
         super().__init__()
 
         self.config = config
-        self.load_clip_model()
-        self.load_beats_model()
-        self.construct_multimodal_encoder()
+
+        # CLIP
+        self.vision_encoder = CustomCLIP(
+            image_size=self.config.vision_resolution,
+        )
+        self.vision_dim = 1408
+
+        # BEATS
+        cfg = BEATsConfig()
+
+        self.audio_encoder = BEATs(cfg)
+        self.audio_dim = 768
+
+        # BERT
+        bertconfig = BertConfig()
+        bertconfig.add_cross_attention = True
+        bertconfig.is_decoder = True
+        self.multimodal_encoder = BertForMaskedLM(bertconfig)
+        self.multimodal_encoder.tokenizer = BertTokenizer('./pretrained_weights/bert/bert-base-uncased/vocab.txt')
+        self.multimodal_dim = 768
 
         # VAST
         contra_dim = self.config.contra_dim
-        self.contra_head_t = Contra_head(self.multimodal_dim, contra_dim)
+        self.contra_head_t = Contra_head(self.multimodal_dim, contra_dim) # This should be unused
         self.contra_head_s = Contra_head(self.multimodal_dim, contra_dim)
         self.contra_head_v = Contra_head(self.vision_dim, contra_dim)
         self.contra_head_a = Contra_head(self.audio_dim, contra_dim)
@@ -146,28 +216,7 @@ class VAST(nn.Module):
         self.vision_type_embeddings = nn.Parameter(0.02 * torch.randn(1, 1, self.multimodal_dim)) 
         self.audio_type_embeddings = nn.Parameter(0.02 * torch.randn(1, 1, self.multimodal_dim)) 
         self.subtitle_type_embeddings = nn.Parameter(0.02 * torch.randn(1, 1, self.multimodal_dim)) 
-        self.beam_size  = config.beam_size
-        self.itm_ratio = config.itm_ratio   
-        self.max_omni_caption_len = config.max_omni_caption_len
-        self.max_caption_len = config.max_caption_len
         self.max_subtitle_len = config.max_subtitle_len
-
-    def load_beats_model(self):
-        from .audio_encoders.beats.beats import (
-            BEATs,
-            BEATsConfig,
-        )
-        cfg = BEATsConfig()
-
-        self.audio_encoder = BEATs(cfg, checkpointing = self.config.checkpointing)
-        self.audio_dim = 768
-
-    def load_clip_model(self):
-        self.vision_dim = 1408
-
-        self.vision_encoder = CustomCLIP(
-            image_size=self.config.vision_resolution,
-        )
 
     def pool_vision_for_contra(self, feature):
         # always use frame_avg for retrieval
@@ -230,51 +279,6 @@ class VAST(nn.Module):
         return subtitle_output
 
     def construct_multimodal_encoder(self):
-        # For some reason using the upstream bert model here tanks the
-        # inference quality. Maybe figure that out in the future
-        from .text_encoders.bert.bert import (
-            BertConfig,
-            BertForMaskedLM,
-        )
-
-        bertconfig = BertConfig()
-        bertconfig.add_cross_attention = True
-        bertconfig.is_decoder = True
-        self.multimodal_encoder = BertForMaskedLM(bertconfig)
-        self.multimodal_dim = 768
-
-        if self.config.checkpointing:
-            self.multimodal_encoder._set_gradient_checkpointing(self.multimodal_encoder.bert.encoder, True)
-
-        from transformers import (
-            BertTokenizer,
-        )
-
-        self.multimodal_encoder.tokenizer = BertTokenizer.from_pretrained('./pretrained_weights/bert/bert-base-uncased')
-
-    def _caption_tokens(self, batch):
-        caption_tokens = self.multimodal_encoder.tokenizer(
-            batch.raw_captions,
-            padding="max_length",
-            truncation=True,
-            max_length=self.max_caption_len,
-            return_tensors="pt"
-        ).to(torch.device('cuda'))
-        return caption_tokens
-
-
-    def _feat_t(self, caption_tokens):
-        input_ids = caption_tokens.input_ids
-        attention_mask = caption_tokens.attention_mask
-        caption_output = self.multimodal_encoder.bert(
-            input_ids = input_ids,
-            attention_mask = attention_mask,
-        ).last_hidden_state
-
-        caption_output_pooled = self.pool_text_for_contra(caption_output)
-        feat_t = self.contra_head_t(caption_output_pooled) 
-        feat_t = F.normalize(feat_t,dim=-1)
-        return feat_t
 
     def _feat_vas(self, vision, audio, subtitle):
         vision_output_pooled = self.pool_vision_for_contra(vision)
@@ -296,25 +300,25 @@ class VAST(nn.Module):
 
         return condition_feats_vas
 
-    def _vision_output(self, batch):
-        vision_pixels = batch.vision_pixels
+    def _vision_output(self, vision_pixels):
+        vision_pixels = vision_pixels
         b,n,_,h,w = vision_pixels.shape
         vision_output = self.vision_encoder.visual(vision_pixels.reshape(b*n,3,h,w), return_all_features=True)
         vision_output = vision_output.reshape(b,-1,*vision_output.shape[-2:])
 
         return vision_output
 
-    def _audio_output(self, batch):
-        audio_spectrograms = batch.audio_spectrograms
+    def _audio_output(self, audio_spectrograms):
+        audio_spectrograms = audio_spectrograms
         b,n,h,w, = audio_spectrograms.shape
         audio_spectrograms = audio_spectrograms.reshape(-1,*audio_spectrograms.shape[2:])
         audio_output = self.audio_encoder(audio_spectrograms)
         audio_output = audio_output.reshape(b,n,-1,audio_output.shape[-1])
         return audio_output
 
-    def _subtitle_output(self, batch):
+    def _subtitle_output(self, raw_subtitles):
         subtitle_tokens = self.multimodal_encoder.tokenizer(
-            batch.raw_subtitles,
+            raw_subtitles,
             padding="max_length",
             truncation=True,
             max_length=self.max_subtitle_len,
@@ -328,26 +332,6 @@ class VAST(nn.Module):
             attention_mask = attention_mask,
         ).last_hidden_state
         return subtitle_output
-
-    def forward(self, batch):
-        batch = edict(batch)
-
-        caption_tokens = self._caption_tokens(batch)
-
-        evaluation_dict = {}
-        evaluation_dict['feat_t'] = self._feat_t(caption_tokens)
-        evaluation_dict['input_ids'] = caption_tokens.input_ids
-        evaluation_dict['attention_mask'] = caption_tokens.attention_mask
-
-        vision = self._vision_output(batch)
-        audio = self._audio_output(batch)
-        subtitle = self._subtitle_output(batch)
-
-        #### compute_itc
-        evaluation_dict[f'feat_cond_tvas'] = self._feat_vas(vision, audio, subtitle)
-        evaluation_dict[f'condition_feats_tvas'] = self._condition_feats_vas(vision, audio, subtitle)
-
-        return evaluation_dict
 
     def compute_slice_scores(self, slice_multimodal_vision_input, slice_input_ids, slice_attention_mask):
         slice_output = self.multimodal_encoder.bert(

@@ -2,7 +2,7 @@ import itertools
 import json
 import os
 from time import (
-    time
+    time,
 )
 
 import numpy as np
@@ -11,87 +11,76 @@ import torch.distributed as dist
 from easydict import EasyDict as edict
 from torch.nn import functional as F
 from tqdm import (
-    tqdm
+    tqdm,
 )
 
 from evaluation_tools.caption_tools.pycocoevalcap.eval import (
-    COCOEvalCap
+    COCOEvalCap,
 )
 from evaluation_tools.caption_tools.pycocotools.coco import (
-    COCO
+    COCO,
 )
 from evaluation_tools.vqa_tools.vqa import (
-    VQA
+    VQA,
 )
 from evaluation_tools.vqa_tools.vqa_eval import (
-    VQAEval
+    VQAEval,
 )
 from utils.distributed import (
     all_gather_list,
-    ddp_allgather
+    ddp_allgather,
 )
 from utils.logger import (
-    LOGGER
+    LOGGER,
 )
 from utils.tool import (
-    NoOp
+    NoOp,
 )
 
 cpu_device = torch.device("cpu")
 
-
-def evaluate_mm(model, loader, run_cfg, global_step):
-    eval_log = {}
-    model.eval()
-    LOGGER.info(f"evaluate task")
-    val_log = evaluate_single(model, loader, "ret%tvas", run_cfg, global_step, "msrvtt_ret")
-    eval_log["ret%tvas"] = val_log
-    model.train()
-    return eval_log
-
-
 @torch.no_grad()
-def evaluate_single(model, val_loader, task, run_cfg, global_step,dset_name):
-    LOGGER.info("start running {} validation...".format(task))
-    return evaluate_ret(model, task, val_loader, global_step)
-
-@torch.no_grad()
-def evaluate_ret(model, tasks, val_loader, global_step):
+def evaluate_ret(model, text_model, video_loader, caption_loader):
     val_log = {}
-    ids = []
-    ids_txt = []
-    input_ids = []
-    attention_mask = []
+    # input_ids = []
+    # attention_mask = []
  
     feat_t = []
 
     feat_cond = []
-    condition_feats = []
+    # condition_feats = []
 
-    for _, batch in enumerate(val_loader):
-        batch = edict(batch)
-        evaluation_dict= model(batch)
-        feat_t.append(evaluation_dict['feat_t'])
+    caption_ids = []
+    video_ids = []
 
-        input_ids.append(evaluation_dict['input_ids'])
-        attention_mask.append(evaluation_dict['attention_mask'])
+    for _, batch in enumerate(caption_loader):
+        caption_ids += batch["ids"]
 
-        ids += batch.ids
-        ids_txt += list(itertools.chain.from_iterable(batch.ids_txt))
+        text_features = text_model(batch["raw_captions"])
+        feat_t.append(text_features)
+        # input_ids.append(caption_tokens.input_ids)
+        # attention_mask.append(caption_tokens.attention_mask)
 
-        feat_cond.append(evaluation_dict['feat_cond_tvas'])
-        # condition_feats.append(evaluation_dict['condition_feats_tvas'])
+    feat_t = torch.cat(feat_t, dim=0).cpu()
+    # input_ids = torch.cat(input_ids, dim=0).cpu()
+    # attention_mask = torch.cat(attention_mask, dim=0).cpu()
 
-    feat_t = torch.cat(feat_t, dim=0)
-    input_ids = torch.cat(input_ids, dim=0)
-    attention_mask = torch.cat(attention_mask, dim=0)
+    for _, batch in enumerate(video_loader):
+        video_ids += batch["ids"]
+
+        vision = model._vision_output(batch["vision_pixels"])
+        audio = model._audio_output(batch["audio_spectrograms"])
+        subtitle = model._subtitle_output(batch["raw_subtitles"])
+        feat_cond.append(model._feat_vas(vision, audio, subtitle))
+        # condition_feats.append(model._condition_feats_vas(vision, audio, subtitle))
+
+    assert caption_ids == video_ids
 
     score_matrix_t_cond = {}
     ### compute itc_score
     feat_cond =  torch.cat(feat_cond, dim = 0)
-    score_matrix_t_cond = torch.matmul(feat_t, feat_cond.permute(1,0))
-    log = compute_metric_ret(score_matrix_t_cond, ids, ids_txt)
-    log = {k.replace('forward','video'): v for k,v in log.items()}
+    score_matrix_t_cond = torch.matmul(feat_t.cuda(), feat_cond.permute(1,0))
+    log = compute_metric_ret(score_matrix_t_cond, caption_ids, video_ids)
     val_log[f'ret_itc_tvas'] = log
 
 
@@ -181,25 +170,20 @@ def refine_score_matrix(condition_feats, input_ids, attention_mask, score_matrix
 
     return score_matrix_t_cond
 
-
-
-
-
-
-def compute_metric_ret(score_matrix, ids, ids_txt):
-    assert score_matrix.shape == (len(ids_txt), len(ids))
+def compute_metric_ret(score_matrix, caption_ids, video_ids):
+    assert score_matrix.shape == (len(caption_ids), len(video_ids))
 
     indice_matrix = score_matrix.sort(dim=-1, descending=True)[1].tolist()
     rank = []
-    for i in range(len(ids_txt)):
-        gt_indice = ids.index(ids_txt[i])
+    for i in range(len(caption_ids)):
+        gt_indice = video_ids.index(caption_ids[i])
         rank.append(indice_matrix[i].index(gt_indice))
 
     rank = torch.tensor(rank).to(score_matrix)
-    
-    vr_r1 = (rank < 1).sum().item() / len(ids_txt)
-    vr_r5 = (rank < 5).sum().item() / len(ids_txt)
-    vr_r10 = (rank < 10).sum().item() / len(ids_txt)
+
+    vr_r1 = (rank < 1).sum().item() / len(caption_ids)
+    vr_r5 = (rank < 5).sum().item() / len(caption_ids)
+    vr_r10 = (rank < 10).sum().item() / len(caption_ids)
 
     eval_log = {
         'forward_r1': round(vr_r1*100,1),

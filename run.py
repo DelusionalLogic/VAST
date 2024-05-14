@@ -4,14 +4,15 @@ from torch.utils.data import (
 )
 
 from data.IndexAnno import (
-    AnnoIndexedDataset,
-    collate,
+    Captions,
+    Videos,
 )
 from evaluation.evaluation_mm import (
     evaluate_ret,
 )
 from model.vast import (
     VAST,
+    VastTextEncoder,
 )
 from utils.args import (
     get_args,
@@ -48,15 +49,24 @@ def main():
     model.to(gpu)
     model.eval()
 
+    text_model = VastTextEncoder(args.model_cfg)
+    text_model.load_state_dict(checkpoint, strict=False)
+    text_model.to(gpu)
+    text_model.eval()
+
     ### Open the dataset
     val_loaders = DataLoader(
-        AnnoIndexedDataset(),
+        Videos(),
         batch_size = 12,
-        collate_fn = collate,
+    )
+
+    caption_loader = DataLoader(
+        Captions(),
+        batch_size = 512,
     )
 
     ### start evaluation
-    val_log = evaluate_ret(model, "ret%tvas", val_loaders, 0)
+    val_log = evaluate_ret(model, text_model, val_loaders, caption_loader)
     print(f"==== evaluation--msrvtt_ret========\n")
     print(val_log)
 

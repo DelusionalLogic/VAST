@@ -1,14 +1,9 @@
 from torch.utils.data import (
-    DataLoader
-)
-
-from data.IndexAnno import (
-    AnnoIndexedDataset,
-    collate
+    DataLoader,
 )
 
 from .logger import (
-    LOGGER
+    LOGGER,
 )
 
 

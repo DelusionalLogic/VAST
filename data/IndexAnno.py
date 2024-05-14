@@ -1,22 +1,22 @@
 import json
 from pathlib import (
-    Path
+    Path,
 )
 
 import decord
 import torch
 import torchaudio
 from toolz.sandbox import (
-    unzip
+    unzip,
 )
 from torch.utils.data import (
-    Dataset
+    Dataset,
 )
 from torchvision.transforms.transforms import (
     CenterCrop,
     Compose,
     Normalize,
-    Resize
+    Resize,
 )
 
 vision_path = Path("datasets/srcdata/msrvtt/videos/")
@@ -62,14 +62,14 @@ def read_video(id_):
     return vision_pixels.cuda()
 
 def read_audio(id_):
-    wav_file = audio_path / (id_+".wav")
+    video_path = vision_path / (id_+".mp4")
 
-    if not wav_file.exists():
-        print('not have audios', id_)
+    try:
+        waveform, sr = torchaudio.load(str(video_path))
+    except TypeError:
+        # No/Multiple audio tracks found
         return torch.zeros(audio_sample_num, 1024, 64).cuda()
-    print("Do have audios", id_)
 
-    waveform, sr = torchaudio.load(str(wav_file))
     if sr != 16000:
         trans = torchaudio.transforms.Resample(sr, 16000)
         waveform = trans(waveform)
@@ -97,12 +97,29 @@ def read_audio(id_):
     fbank = torch.stack(output_slices,dim=0)   ### n, 1024, 128
     return fbank.cuda()
 
-class AnnoIndexedDataset(Dataset):
-    def __init__(self, *args):
+class Captions(Dataset):
+    def __init__(self):
         annotation_file = Path("datasets/annotations/msrvtt/descs_ret_test.json")
         self.annos = json.load(annotation_file.open())
-        self.idx = list(range(len(self.annos)))
-        self.dataset_name = "msrvtt_ret"
+
+    def __len__(self):
+        return len(self.annos)
+
+    def __getitem__(self, i):
+        anno = self.annos[i]
+
+        id_ = anno["video_id"]
+        raw_captions = anno['desc']
+
+        return {
+            "ids": id_,
+            "raw_captions": raw_captions,
+        }
+
+class Videos(Dataset):
+    def __init__(self):
+        annotation_file = Path("datasets/annotations/msrvtt/descs_ret_test.json")
+        self.annos = json.load(annotation_file.open())
 
     def __len__(self):
         return len(self.annos)
@@ -112,51 +129,13 @@ class AnnoIndexedDataset(Dataset):
 
         id_ = anno["video_id"]
 
-        raw_captions = None
-        raw_subtitles = None
-        question_id = None
-        question = None
-        answer = None
-        id_txt = None
-        vision_pixels = None
-        audio_spectrograms = None 
-
-        raw_captions = anno['desc']
-        num_samples = 1
-        id_txt = [id_] * num_samples
-
         raw_subtitles = anno['subtitle']
-
         vision_pixels = read_video(id_)
-        assert vision_pixels is not None
-
         audio_spectrograms = read_audio(id_)
-        assert audio_spectrograms is not None
 
-        return (id_, raw_captions, vision_pixels, id_txt, question, answer, question_id, audio_spectrograms, raw_subtitles)
-
-
-def collate(inputs):
-    batch = {}
-    all_data = map(list, unzip(inputs))
-    keys = [
-        'ids', 
-        'raw_captions', 
-        'vision_pixels', 
-        'ids_txt', 
-        'raw_questions', 
-        'raw_answers', 
-        'question_ids', 
-        'audio_spectrograms',
-        'raw_subtitles'
-    ]
-
-    for key, data in zip(keys, all_data):
-        if data[0] is None:
-            continue 
-        elif isinstance(data[0], torch.Tensor):
-            batch[key] = torch.stack(data, dim=0).float().cuda()
-        else:
-            batch[key] = data
-
-    return batch
+        return {
+            "ids": id_,
+            "vision_pixels": vision_pixels.float().cuda(),
+            "audio_spectrograms": audio_spectrograms.float().cuda(),
+            "raw_subtitles": raw_subtitles
+        }
