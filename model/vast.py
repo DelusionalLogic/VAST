@@ -48,157 +48,59 @@ to_2tuple = _ntuple(2)
 
 class Attention(nn.Module):
     def __init__(
-            self, dim, num_heads=8, qkv_bias=False, qk_scale=None, attn_drop=0.,
-            proj_drop=0., window_size=None, attn_head_dim=None, xattn=False, rope=None, subln=False, norm_layer=nn.LayerNorm):
+            self, dim, num_heads=8, qkv_bias=True, qk_scale=None,
+            proj_drop=0., norm_layer=nn.LayerNorm):
         super().__init__()
         self.num_heads = num_heads
         head_dim = dim // num_heads
-        if attn_head_dim is not None:
-            head_dim = attn_head_dim
         all_head_dim = head_dim * self.num_heads
         self.scale = qk_scale or head_dim ** -0.5
 
-        self.subln = subln
-        if self.subln:
-            self.q_proj = nn.Linear(dim, all_head_dim, bias=False)
-            self.k_proj = nn.Linear(dim, all_head_dim, bias=False)
-            self.v_proj = nn.Linear(dim, all_head_dim, bias=False)
-        else:
-            self.qkv = nn.Linear(dim, all_head_dim * 3, bias=False)
+        self.qkv = nn.Linear(dim, all_head_dim * 3, bias=False)
 
-        if qkv_bias:
-            self.q_bias = nn.Parameter(torch.zeros(all_head_dim))
-            self.v_bias = nn.Parameter(torch.zeros(all_head_dim))
-        else:
-            self.q_bias = None
-            self.v_bias = None
+        self.q_bias = nn.Parameter(torch.zeros(all_head_dim))
+        self.v_bias = nn.Parameter(torch.zeros(all_head_dim))
 
-        if window_size:
-            self.window_size = window_size
-            self.num_relative_distance = (2 * window_size[0] - 1) * (2 * window_size[1] - 1) + 3
-            self.relative_position_bias_table = nn.Parameter(
-                torch.zeros(self.num_relative_distance, num_heads))  # 2*Wh-1 * 2*Ww-1, nH
-            # cls to token & token 2 cls & cls to cls
-
-            # get pair-wise relative position index for each token inside the window
-            coords_h = torch.arange(window_size[0])
-            coords_w = torch.arange(window_size[1])
-            coords = torch.stack(torch.meshgrid([coords_h, coords_w]))  # 2, Wh, Ww
-            coords_flatten = torch.flatten(coords, 1)  # 2, Wh*Ww
-            relative_coords = coords_flatten[:, :, None] - coords_flatten[:, None, :]  # 2, Wh*Ww, Wh*Ww
-            relative_coords = relative_coords.permute(1, 2, 0).contiguous()  # Wh*Ww, Wh*Ww, 2
-            relative_coords[:, :, 0] += window_size[0] - 1  # shift to start from 0
-            relative_coords[:, :, 1] += window_size[1] - 1
-            relative_coords[:, :, 0] *= 2 * window_size[1] - 1
-            relative_position_index = \
-                torch.zeros(size=(window_size[0] * window_size[1] + 1, ) * 2, dtype=relative_coords.dtype)
-            relative_position_index[1:, 1:] = relative_coords.sum(-1)  # Wh*Ww, Wh*Ww
-            relative_position_index[0, 0:] = self.num_relative_distance - 3
-            relative_position_index[0:, 0] = self.num_relative_distance - 2
-            relative_position_index[0, 0] = self.num_relative_distance - 1
-
-            self.register_buffer("relative_position_index", relative_position_index)
-        else:
-            self.window_size = None
-            self.relative_position_bias_table = None
-            self.relative_position_index = None
-
-        self.attn_drop = nn.Dropout(attn_drop)
-        self.inner_attn_ln = norm_layer(all_head_dim) if subln else nn.Identity()
+        self.inner_attn_ln = nn.Identity()
         # self.proj = nn.Linear(all_head_dim, all_head_dim)
         self.proj = nn.Linear(all_head_dim, dim)
-        self.proj_drop = nn.Dropout(proj_drop)
-        self.xattn = xattn
-        self.xattn_drop = attn_drop
-
-        self.rope = rope
 
     def forward(self, x, rel_pos_bias=None, attn_mask=None):
         B, N, C = x.shape
-        if self.subln: 
-            q = F.linear(input=x, weight=self.q_proj.weight, bias=self.q_bias)
-            k = F.linear(input=x, weight=self.k_proj.weight, bias=None)
-            v = F.linear(input=x, weight=self.v_proj.weight, bias=self.v_bias)
 
-            q = q.reshape(B, N, self.num_heads, -1).permute(0, 2, 1, 3)     # B, num_heads, N, C
-            k = k.reshape(B, N, self.num_heads, -1).permute(0, 2, 1, 3)  
-            v = v.reshape(B, N, self.num_heads, -1).permute(0, 2, 1, 3) 
-        else: 
+        qkv_bias = None
+        qkv_bias = torch.cat((self.q_bias, torch.zeros_like(self.v_bias, requires_grad=False), self.v_bias))
+        # print('xshape',x.shape)
+        # print('weight_shape',self.qkv.weight.shape)
+        qkv = F.linear(input=x, weight=self.qkv.weight, bias=qkv_bias)
+        qkv = qkv.reshape(B, N, 3, self.num_heads, -1).permute(2, 0, 3, 1, 4)   # 3, B, num_heads, N, C
+        q, k, v = qkv[0], qkv[1], qkv[2]
 
-            qkv_bias = None
-            if self.q_bias is not None:
-                qkv_bias = torch.cat((self.q_bias, torch.zeros_like(self.v_bias, requires_grad=False), self.v_bias))
-            # print('xshape',x.shape)
-            # print('weight_shape',self.qkv.weight.shape)
-            qkv = F.linear(input=x, weight=self.qkv.weight, bias=qkv_bias)
-            qkv = qkv.reshape(B, N, 3, self.num_heads, -1).permute(2, 0, 3, 1, 4)   # 3, B, num_heads, N, C
-            q, k, v = qkv[0], qkv[1], qkv[2]
+        q = q * self.scale
+        attn = (q @ k.transpose(-2, -1))
 
-        if self.rope:
-            # slightly fast impl
-            q_t = q[:, :, 1:, :]
-            ro_q_t = self.rope(q_t)
-            q = torch.cat((q[:, :, :1, :], ro_q_t), -2).type_as(v)
+        if rel_pos_bias is not None:
+            attn = attn + rel_pos_bias.type_as(attn)
 
-            k_t = k[:, :, 1:, :]
-            ro_k_t = self.rope(k_t)
-            k = torch.cat((k[:, :, :1, :], ro_k_t), -2).type_as(v)
-        
+        if attn_mask is not None:
+            attn_mask = attn_mask.bool()
+            attn = attn.masked_fill(~attn_mask[:, None, None, :], float("-inf"))
 
-        if self.xattn:
-            q = q.permute(0, 2, 1, 3)   # B, num_heads, N, C -> B, N, num_heads, C
-            k = k.permute(0, 2, 1, 3)
-            v = v.permute(0, 2, 1, 3)
+        attn = attn.softmax(dim=-1)
 
-            x = xops.memory_efficient_attention(
-                q, k, v,
-                p=self.xattn_drop,
-                scale=self.scale,
-                )
-            x = x.reshape(B, N, -1)
-            x = self.inner_attn_ln(x)
-            x = self.proj(x)
-            x = self.proj_drop(x)
-        else:
-            q = q * self.scale
-            attn = (q @ k.transpose(-2, -1))
-
-            if self.relative_position_bias_table is not None:
-                relative_position_bias = \
-                    self.relative_position_bias_table[self.relative_position_index.view(-1)].view(
-                        self.window_size[0] * self.window_size[1] + 1,
-                        self.window_size[0] * self.window_size[1] + 1, -1)  # Wh*Ww,Wh*Ww,nH
-                relative_position_bias = relative_position_bias.permute(2, 0, 1).contiguous()  # nH, Wh*Ww, Wh*Ww
-                attn = attn + relative_position_bias.unsqueeze(0).type_as(attn)
-
-            if rel_pos_bias is not None:
-                attn = attn + rel_pos_bias.type_as(attn)
-
-            if attn_mask is not None:
-                attn_mask = attn_mask.bool()
-                attn = attn.masked_fill(~attn_mask[:, None, None, :], float("-inf"))
-            
-            attn = attn.softmax(dim=-1)
-            attn = self.attn_drop(attn)
-
-            x = (attn @ v).transpose(1, 2).reshape(B, N, -1)
-            x = self.inner_attn_ln(x)
-            x = self.proj(x)
-            x = self.proj_drop(x)
+        x = (attn @ v).transpose(1, 2).reshape(B, N, -1)
+        x = self.inner_attn_ln(x)
+        x = self.proj(x)
         return x
 
 class Block(nn.Module):
-
-    def __init__(self, dim, num_heads, mlp_ratio=4., qkv_bias=False, qk_scale=None, drop=0., attn_drop=0.,
-                 drop_path=0., init_values=None, norm_layer=nn.LayerNorm,
-                 window_size=None, attn_head_dim=None, xattn=False, rope=None, postnorm=False,
-                 subln=False):
+    def __init__(self, dim, num_heads, mlp_ratio=4., qkv_bias=True, qk_scale=None, drop=0.,
+                 drop_path=0., init_values=None, norm_layer=nn.LayerNorm, postnorm=False):
         super().__init__()
         self.norm1 = norm_layer(dim)
         self.attn = Attention(
-            dim, num_heads=num_heads, qkv_bias=qkv_bias, qk_scale=qk_scale,
-            attn_drop=attn_drop, proj_drop=drop, window_size=window_size, attn_head_dim=attn_head_dim,
-            xattn=False, rope=rope, subln=subln, norm_layer=norm_layer)
+            dim, num_heads=num_heads, qkv_bias=qkv_bias, qk_scale=qk_scale, proj_drop=drop,
+            norm_layer=norm_layer)
         # NOTE: drop path for stochastic depth, we shall see if this is better than dropout here
         self.norm2 = norm_layer(dim)
         mlp_hidden_dim = int(dim * mlp_ratio)
@@ -263,11 +165,10 @@ class EVAVisionTransformer(nn.Module):
     """ Vision Transformer with support for patch or hybrid CNN input stage
     """
     def __init__(self, img_size, patch_size=16, in_chans=3, embed_dim=768, depth=12,
-                 num_heads=12, mlp_ratio=4., qkv_bias=False, qk_scale=None, attn_drop_rate=0.,
-                 drop_path_rate=0.4, norm_layer=nn.LayerNorm, init_values=None, patch_dropout=0.,
-                 use_abs_pos_emb=True, use_rel_pos_bias=False, use_shared_rel_pos_bias=False, rope=False,
-                 use_mean_pooling=True, init_scale=0.001, grad_checkpointing=False, xattn=False, postnorm=False,
-                 pt_hw_seq_len=16, intp_freq=False, naiveswiglu=False, subln=False):
+                 num_heads=12, mlp_ratio=4., qkv_bias=True, qk_scale=None,
+                 drop_path_rate=0.4, norm_layer=nn.LayerNorm, init_values=None,
+                 use_abs_pos_emb=True,
+                 init_scale=0.001, postnorm=False):
         drop_rate = 0
         super().__init__()
         self.image_size = img_size
@@ -281,18 +182,17 @@ class EVAVisionTransformer(nn.Module):
         # self.mask_token = nn.Parameter(torch.zeros(1, 1, embed_dim))
         assert use_abs_pos_emb
         self.pos_embed = nn.Parameter(torch.zeros(1, num_patches + 1, embed_dim))
-        self.pos_drop = nn.Dropout(p=drop_rate)
 
         dpr = [x.item() for x in torch.linspace(0, drop_path_rate, depth)]  # stochastic depth decay rule
         self.blocks = nn.ModuleList([
             Block(
                 dim=embed_dim, num_heads=num_heads, mlp_ratio=mlp_ratio, qkv_bias=qkv_bias, qk_scale=qk_scale,
-                drop=drop_rate, attn_drop=attn_drop_rate, drop_path=dpr[i], norm_layer=norm_layer,
+                drop=drop_rate, drop_path=dpr[i], norm_layer=norm_layer,
                 init_values=init_values,
-                xattn=xattn, postnorm=postnorm, subln=subln)
+                postnorm=postnorm)
             for i in range(depth)])
-        self.norm = nn.Identity() if use_mean_pooling else norm_layer(embed_dim)
-        self.fc_norm = norm_layer(embed_dim) if use_mean_pooling else None
+        self.norm = norm_layer(embed_dim)
+        self.fc_norm = None
         self.head = nn.Linear(embed_dim, self.num_classes)
         trunc_normal_(self.head.weight, std=.02)
         self.head.weight.data.mul_(init_scale)
@@ -311,7 +211,6 @@ class EVAVisionTransformer(nn.Module):
         x = torch.cat((cls_tokens, x), dim=1)
         if self.pos_embed is not None:
             x = x + self.pos_embed
-        x = self.pos_drop(x)
 
         for blk in self.blocks:
             x = blk(x, rel_pos_bias=None)
@@ -331,7 +230,6 @@ class CustomCLIP(nn.Module):
             patch_size=14,
             use_mean_pooling=False,
             init_values=None,
-            patch_dropout=.0,
             embed_dim=1408,
             depth=40,
             num_heads=16,
@@ -339,12 +237,7 @@ class CustomCLIP(nn.Module):
             qkv_bias=True,
             drop_path_rate=0.4,
             norm_layer=partial(nn.LayerNorm, eps=1e-6),
-            xattn=True,
-            rope=False,
-            postnorm=False, pt_hw_seq_len=16,   # 224/14
-            intp_freq=False,
-            naiveswiglu=False,
-            subln=False
+            postnorm=False
         )
 
         self.logit_scale = nn.Parameter(torch.ones([]) * np.log(1 / 0.07))
