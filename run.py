@@ -45,6 +45,21 @@ def main():
     # del checkpoint["multimodal_encoder.bert.embeddings.position_ids"]
     for k in [k for k in checkpoint if "vision_encoder.text" in k]:
             del checkpoint[k]
+
+    replacement = []
+    for k in checkpoint:
+        new_k = k
+        new_k = new_k.replace("mlp.fc1", "mlp.0")
+        new_k = new_k.replace("mlp.act", "mlp.1")
+        new_k = new_k.replace("mlp.fc2", "mlp.3")
+
+        if k != new_k:
+            replacement.append((k, new_k))
+
+    for (k, new_k) in replacement:
+        checkpoint[new_k] = checkpoint[k]
+        del checkpoint[k]
+
     model.load_state_dict(checkpoint)
     model.to(gpu)
     model.eval()
