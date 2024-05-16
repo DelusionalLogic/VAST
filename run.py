@@ -49,6 +49,8 @@ def main():
     # del checkpoint["multimodal_encoder.bert.embeddings.position_ids"]
     for k in [k for k in checkpoint if "vision_encoder.text" in k]:
             del checkpoint[k]
+    for k in [k for k in checkpoint if "multimodal_encoder.cls" in k]:
+            del checkpoint[k]
 
     replacement = []
     for k in checkpoint:
