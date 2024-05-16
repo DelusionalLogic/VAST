@@ -1,3 +1,4 @@
+import coverage
 import torch
 from torch.utils.data import (
     DataLoader,
@@ -27,6 +28,9 @@ from utils.initialize import (
 
 
 def main():
+
+    # cov = coverage.Coverage()
+    # cov.start()
 
     ### init 
     args = get_args()
@@ -84,6 +88,10 @@ def main():
     val_log = evaluate_ret(model, text_model, val_loaders, caption_loader)
     print(f"==== evaluation--msrvtt_ret========\n")
     print(val_log)
+
+#     cov.stop()
+#     cov.save()
+#     cov.html_report()
 
 
 if __name__ == "__main__":
