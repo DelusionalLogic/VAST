@@ -51,6 +51,8 @@ def main():
             del checkpoint[k]
     for k in [k for k in checkpoint if "multimodal_encoder.cls" in k]:
             del checkpoint[k]
+    for k in [k for k in checkpoint if "multimodal_encoder.bert.encoder.layer" in k and "crossattention" in k]:
+            del checkpoint[k]
 
     replacement = []
     for k in checkpoint:
