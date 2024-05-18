@@ -61,6 +61,21 @@ def main():
         new_k = new_k.replace("mlp.act", "mlp.1")
         new_k = new_k.replace("mlp.fc2", "mlp.3")
 
+        new_k = new_k.replace(".intermediate.dense", ".intermediate")
+        new_k = new_k.replace(".attention.self.", ".")
+        new_k = new_k.replace(".attention.output.dense", ".attention_dense")
+        new_k = new_k.replace(".attention.output.LayerNorm", ".attention_norm")
+        new_k = new_k.replace(".output.dense", ".output")
+        new_k = new_k.replace(".output.LayerNorm", ".output_norm")
+
+        new_k = new_k.replace(".embeddings.LayerNorm", ".embeddings_norm")
+        new_k = new_k.replace(".embeddings.position_ids", ".position_ids")
+        new_k = new_k.replace(".embeddings.word_embeddings", ".word_embeddings")
+        new_k = new_k.replace(".embeddings.position_embeddings", ".position_embeddings")
+        new_k = new_k.replace(".embeddings.token_type_embeddings", ".token_type_embeddings")
+        new_k = new_k.replace(".bert.encoder.layer", ".bert.layer")
+        new_k = new_k.replace("multimodal_encoder.bert.", "multimodal_encoder.")
+
         if k != new_k:
             replacement.append((k, new_k))
 

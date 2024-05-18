@@ -1,15 +1,9 @@
-import collections.abc
-import math
 from functools import (
     partial,
-)
-from itertools import (
-    repeat,
 )
 from typing import (
     Optional,
     Tuple,
-    cast,
 )
 
 import numpy as np
@@ -18,7 +12,6 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torchvision
 from torch import (
-    Tensor,
     nn,
 )
 from torch.nn.init import (
@@ -26,20 +19,6 @@ from torch.nn.init import (
 )
 from transformers import (
     BertTokenizer,
-    PretrainedConfig,
-    PreTrainedModel,
-)
-from transformers.activations import (
-    ACT2FN,
-    GELUActivation,
-)
-from transformers.modeling_outputs import (
-    BaseModelOutputWithPastAndCrossAttentions,
-    BaseModelOutputWithPoolingAndCrossAttentions,
-)
-from transformers.modeling_utils import (
-    PreTrainedModel,
-    apply_chunking_to_forward,
 )
 
 from .audio_encoders.beats.beats import (
@@ -52,61 +31,45 @@ from .general_module import (
 )
 
 
-class BertConfig(PretrainedConfig):
-    model_type = "bert"
-
-    def __init__(
-        self,
-        pad_token_id=0,
-        **kwargs,
-    ):
-        super().__init__(pad_token_id=pad_token_id, **kwargs)
-
-
-class BertSelfAttention(nn.Module):
+class BertLayer(nn.Module):
     def __init__(self):
         super().__init__()
+        self.seq_len_dim = 1
 
-        self.attention_head_size = int(768 / 12)
-        self.all_head_size = 12 * self.attention_head_size
+        self.query = nn.Linear(768, 768)
+        self.key = nn.Linear(768, 768)
+        self.value = nn.Linear(768, 768)
 
-        self.query = nn.Linear(768, self.all_head_size)
-        self.key = nn.Linear(768, self.all_head_size)
-        self.value = nn.Linear(768, self.all_head_size)
+        self.attention_dense = nn.Linear(768, 768)
+        self.attention_norm = nn.LayerNorm(768, eps=1e-12)
+
+        self.intermediate = nn.Linear(768, 3072)
+
+        self.output = nn.Linear(3072, 768)
+        self.output_norm = nn.LayerNorm(768, eps=1e-12)
 
     def transpose_for_scores(self, x: torch.Tensor) -> torch.Tensor:
-        new_x_shape = x.size()[:-1] + (12, self.attention_head_size)
+        new_x_shape = x.size()[:-1] + (12, 64)
         x = x.view(new_x_shape)
         return x.permute(0, 2, 1, 3)
 
     def forward(
         self,
-        hidden_states: torch.Tensor,
-        attention_mask: Optional[torch.FloatTensor] = None,
-    ) -> torch.Tensor:
-        mixed_query_layer = self.query(hidden_states)
+        input_: Tuple[torch.Tensor, torch.FloatTensor]
+    ) -> Tuple[torch.Tensor, Optional[torch.FloatTensor]]:
+        (states_in, attention_mask) = input_
 
-        key_layer = self.transpose_for_scores(self.key(hidden_states))
-        value_layer = self.transpose_for_scores(self.value(hidden_states))
-
-        query_layer = self.transpose_for_scores(mixed_query_layer)
-
-        # if cross_attention save Tuple(torch.Tensor, torch.Tensor) of all cross attention key/value_states.
-        # Further calls to cross_attention layer can then reuse all cross-attention
-        # key/value_states (first "if" case)
-        # if uni-directional self-attention (decoder) save Tuple(torch.Tensor, torch.Tensor) of
-        # all previous decoder key/value_states. Further calls to uni-directional self-attention
-        # can concat previous decoder key/value_states to current projected key/value_states (third "elif" case)
-        # if encoder bi-directional self-attention `past_key_value` is always `None`
-        past_key_value : Tuple[Tensor, Tensor] = (key_layer, value_layer)
+        key_layer = self.transpose_for_scores(self.key(states_in))
+        value_layer = self.transpose_for_scores(self.value(states_in))
+        query_layer = self.transpose_for_scores(self.query(states_in))
 
         # Take the dot product between "query" and "key" to get the raw attention scores.
         attention_scores = torch.matmul(query_layer, key_layer.transpose(-1, -2))
 
-        attention_scores = attention_scores / math.sqrt(self.attention_head_size)
-        if attention_mask is not None:
-            # Apply the attention mask is (precomputed for all layers in BertModel forward() function)
-            attention_scores = attention_scores + attention_mask
+        attention_scores = attention_scores / 8
+
+        # Apply the attention mask is (precomputed for all layers in BertModel forward() function)
+        attention_scores = attention_scores + attention_mask
 
         # Normalize the attention scores to probabilities.
         attention_probs = nn.functional.softmax(attention_scores, dim=-1)
@@ -114,245 +77,49 @@ class BertSelfAttention(nn.Module):
         context_layer = torch.matmul(attention_probs, value_layer)
 
         context_layer = context_layer.permute(0, 2, 1, 3).contiguous()
-        new_context_layer_shape = context_layer.size()[:-2] + (self.all_head_size,)
-        context_layer = context_layer.view(new_context_layer_shape)
-        return context_layer
+        new_context_layer_shape = context_layer.size()[:-2] + (768,)
+        self_attention_outputs = context_layer.view(new_context_layer_shape)
 
+        self_attention_outputs = self.attention_dense(self_attention_outputs)
+        self_attention_outputs = self.attention_norm(self_attention_outputs + states_in)
 
-class BertSelfOutput(nn.Module):
+        hidden_states = nn.functional.gelu(self.intermediate(self_attention_outputs))
+
+        hidden_states = self.output(hidden_states)
+        hidden_states = self.output_norm(hidden_states + self_attention_outputs)
+
+        return (hidden_states, attention_mask)
+
+class BertModel(nn.Module):
     def __init__(self):
         super().__init__()
-        self.dense = nn.Linear(768, 768)
-        self.LayerNorm = nn.LayerNorm(768, eps=1e-12)
 
-    def forward(self, hidden_states: torch.Tensor, input_tensor: torch.Tensor) -> torch.Tensor:
-        hidden_states = self.dense(hidden_states)
-        hidden_states = self.LayerNorm(hidden_states + input_tensor)
-        return hidden_states
+        self.word_embeddings = nn.Embedding(30522, 768, padding_idx=0)
+        self.position_embeddings = nn.Embedding(512, 768)
+        self.token_type_embeddings = nn.Embedding(2, 768)
 
-class BertAttention(nn.Module):
-    def __init__(self):
-        super().__init__()
-        self.self = BertSelfAttention()
-        self.output = BertSelfOutput()
-        self.pruned_heads = set()
+        self.embeddings_norm = nn.LayerNorm(768, eps=1e-12)
+        self.register_buffer("position_ids", torch.arange(512).unsqueeze((0)))
 
-    def forward(
-        self,
-        hidden_states: torch.Tensor,
-        attention_mask: Optional[torch.FloatTensor] = None,
-    ) -> torch.Tensor:
-        self_outputs = self.self(
-            hidden_states,
-            attention_mask,
-        )
-        return self.output(self_outputs, hidden_states)
-
-
-class BertIntermediate(nn.Module):
-    def __init__(self):
-        super().__init__()
-        self.dense = nn.Linear(768, 3072)
-        self.intermediate_act_fn = GELUActivation()
-
-    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        hidden_states = self.dense(hidden_states)
-        hidden_states = self.intermediate_act_fn(hidden_states)
-        return hidden_states
-
-
-class BertOutput(nn.Module):
-    def __init__(self):
-        super().__init__()
-        self.dense = nn.Linear(3072, 768)
-        self.LayerNorm = nn.LayerNorm(768, eps=1e-12)
-
-    def forward(self, hidden_states: torch.Tensor, input_tensor: torch.Tensor) -> torch.Tensor:
-        hidden_states = self.dense(hidden_states)
-        hidden_states = self.LayerNorm(hidden_states + input_tensor)
-        return hidden_states
-
-
-
-class BertLayer(nn.Module):
-    def __init__(self):
-        super().__init__()
-        self.seq_len_dim = 1
-        self.attention = BertAttention()
-        self.intermediate = BertIntermediate()
-        self.output = BertOutput()
-
-    def forward(
-        self,
-        input_: Tuple[torch.Tensor, Optional[torch.FloatTensor]]
-    ) -> Tuple[torch.Tensor, Optional[torch.FloatTensor]]:
-        (hidden_states, attention_mask) = input_
-
-        # decoder uni-directional self-attention cached key/values tuple is at positions 1,2
-        self_attention_outputs = self.attention(
-            hidden_states,
-            attention_mask,
-        )
-
-        layer_output = self.feed_forward_chunk(self_attention_outputs)
-
-        return (layer_output, attention_mask)
-
-    def feed_forward_chunk(self, attention_output):
-        intermediate_output = self.intermediate(attention_output)
-        layer_output = self.output(intermediate_output, attention_output)
-        return layer_output
-
-
-class BertEncoder(nn.Module):
-    def __init__(self):
-        super().__init__()
         self.layer = nn.Sequential(*[BertLayer() for _ in range(12)])
 
     def forward(
         self,
-        hidden_states: torch.FloatTensor,
-        attention_mask: Optional[torch.FloatTensor] = None,
-    ):
-        hidden_states = self.layer((hidden_states, attention_mask))[0]
-
-        return BaseModelOutputWithPastAndCrossAttentions(
-            last_hidden_state=hidden_states,
-        )
-
-class BertEmbeddings(nn.Module):
-    def __init__(self, config):
-        super().__init__()
-        self.word_embeddings = nn.Embedding(30522, 768, padding_idx=config.pad_token_id)
-        self.position_embeddings = nn.Embedding(512, 768)
-        self.token_type_embeddings = nn.Embedding(2, 768)
-
-        self.LayerNorm = nn.LayerNorm(768, eps=1e-12)
-        self.register_buffer("position_ids", torch.arange(512).expand((1, -1)))
-        self.register_buffer(
-            "token_type_ids", torch.zeros(self.position_ids.size(), dtype=torch.long), persistent=False
-        )
-
-    def forward(
-        self,
-        input_ids: Optional[torch.LongTensor] = None,
-        token_type_ids: Optional[torch.LongTensor] = None,
-    ) -> torch.Tensor:
-        assert input_ids is not None
-        input_shape = input_ids.size()
-
-        seq_length = input_shape[1]
-
-        position_ids = self.position_ids[:, 0 : seq_length + 0]
-        inputs_embeds = self.word_embeddings(input_ids)
-        token_type_embeddings = self.token_type_embeddings(token_type_ids)
-
-        embeddings = inputs_embeds + token_type_embeddings
-        position_embeddings = self.position_embeddings(position_ids)
-        embeddings += position_embeddings
-        embeddings = self.LayerNorm(embeddings)
-        return embeddings
-
-class BertModel(PreTrainedModel):
-    config_class = BertConfig
-    base_model_prefix = "bert"
-    supports_gradient_checkpointing = True
-    _keys_to_ignore_on_load_missing = [r"position_ids"]
-
-    def __init__(self, config):
-        super().__init__(config)
-        self.config = config
-
-        self.embeddings = BertEmbeddings(config)
-        self.encoder = BertEncoder()
-
-        # Initialize weights and apply final processing
-        self.post_init()
-
-    def get_input_embeddings(self):
-        return self.embeddings.word_embeddings
-
-    def get_extended_attention_mask(
-        self,
-        attention_mask: Tensor,
-        input_shape: Tuple[int],
-        device: Optional[torch.device] = None,
-        dtype: Optional[torch.dtype] = None,
-    ) -> Tensor:
-        extended_attention_mask = attention_mask[:, None, None, :]
-        extended_attention_mask = extended_attention_mask.to(dtype=dtype)
-        extended_attention_mask = (1.0 - extended_attention_mask) * -10000.0
-        return extended_attention_mask
-
-    def forward(
-        self,
         input_ids: torch.Tensor,
-        attention_mask: Optional[torch.Tensor] = None,
+        attention_mask: torch.Tensor,
     ):
+        embeddings = self.word_embeddings(input_ids)
 
-        input_shape = input_ids.size()
-        batch_size, seq_length = input_shape
+        embeddings += self.position_embeddings(self.position_ids[:, :input_ids.size(1)])
+        embeddings = self.embeddings_norm(embeddings)
 
-        buffered_token_type_ids = self.embeddings.token_type_ids[:, :seq_length]
-        buffered_token_type_ids_expanded = buffered_token_type_ids.expand(batch_size, seq_length)
-        token_type_ids = buffered_token_type_ids_expanded
+        extended_attention_mask = attention_mask[:, None, None, :]
+        extended_attention_mask = (1.0 - extended_attention_mask) * -10000.0
 
-        # We can provide a self-attention mask of dimensions [batch_size, from_seq_length, to_seq_length]
-        # ourselves in which case we just need to make it broadcastable to all heads.
-
-        assert attention_mask is not None
-        extended_attention_mask: torch.Tensor = self.get_extended_attention_mask(
-            attention_mask,
-            cast(Tuple[int], input_shape),
-            dtype=self.dtype
-        )
-
-        embedding_output = self.embeddings(
-            input_ids=input_ids,
-            token_type_ids=token_type_ids,
-        )
-        encoder_outputs = self.encoder(
-            embedding_output,
-            attention_mask=extended_attention_mask,
-        )
-        sequence_output = encoder_outputs[0]
-
-        return BaseModelOutputWithPoolingAndCrossAttentions(
-            last_hidden_state=sequence_output,
-            hidden_states=encoder_outputs.hidden_states,
-            attentions=encoder_outputs.attentions,
-            cross_attentions=encoder_outputs.cross_attentions,
-        )
-
-
-class BertForMaskedLM(PreTrainedModel):
-    config_class = BertConfig
-    base_model_prefix = "bert"
-    supports_gradient_checkpointing = True
-
-    _keys_to_ignore_on_load_unexpected = [r"pooler"]
-    _keys_to_ignore_on_load_missing = [r"position_ids", r"predictions.decoder.bias"]
-
-    def __init__(self, config):
-        super().__init__(config)
-
-        self.bert = BertModel(config)
-
-        # Initialize weights and apply final processing
-        self.post_init()
-
-def _ntuple(n):
-    def parse(x):
-        if isinstance(x, collections.abc.Iterable) and not isinstance(x, str):
-            return tuple(x)
-        return tuple(repeat(x, n))
-    return parse
-
-to_2tuple = _ntuple(2)
+        return self.layer((embeddings, extended_attention_mask))[0]
 
 class Attention(nn.Module):
-    def __init__(
-            self, dim, num_heads=8, qk_scale=None):
+    def __init__(self, dim, num_heads=8, qk_scale=None):
         super().__init__()
         self.num_heads = num_heads
         head_dim = dim // num_heads
@@ -441,8 +208,8 @@ class PatchEmbed(nn.Module):
     """
     def __init__(self, img_size=224, patch_size=16, in_chans=3, embed_dim=768):
         super().__init__()
-        img_size = to_2tuple(img_size)
-        patch_size = to_2tuple(patch_size)
+        img_size = (img_size, img_size)
+        patch_size = (patch_size, patch_size)
         num_patches = (img_size[1] // patch_size[1]) * (img_size[0] // patch_size[0])
         self.patch_shape = (img_size[0] // patch_size[0], img_size[1] // patch_size[1])
         self.img_size = img_size
@@ -543,16 +310,14 @@ class VastTextEncoder(nn.Module):
 
         self.config = config
 
-        bertconfig = BertConfig()
-        self.multimodal_encoder = BertForMaskedLM(bertconfig)
-
-        self.multimodal_encoder.tokenizer = BertTokenizer('./pretrained_weights/bert/bert-base-uncased/vocab.txt')
+        self.multimodal_encoder = BertModel()
+        self.tokenizer = BertTokenizer('./pretrained_weights/bert/bert-base-uncased/vocab.txt')
 
         # VAST
         self.contra_head_t = Contra_head(768, self.config.contra_dim)
 
     def _caption_tokens(self, raw_captions):
-        caption_tokens = self.multimodal_encoder.tokenizer(
+        caption_tokens = self.tokenizer(
             raw_captions,
             padding="max_length",
             truncation=True,
@@ -567,10 +332,10 @@ class VastTextEncoder(nn.Module):
         input_ids = caption_tokens.input_ids
         attention_mask = caption_tokens.attention_mask
 
-        caption_output = self.multimodal_encoder.bert(
+        caption_output = self.multimodal_encoder(
             input_ids = input_ids,
             attention_mask = attention_mask,
-        ).last_hidden_state
+        )
 
         caption_output_pooled = caption_output[:,0]
         feat_t = self.contra_head_t(caption_output_pooled) 
@@ -597,9 +362,8 @@ class VAST(nn.Module):
         self.audio_dim = 768
 
         # BERT
-        bertconfig = BertConfig()
-        self.multimodal_encoder = BertForMaskedLM(bertconfig)
-        self.multimodal_encoder.tokenizer = BertTokenizer('./pretrained_weights/bert/bert-base-uncased/vocab.txt')
+        self.multimodal_encoder = BertModel()
+        self.tokenizer = BertTokenizer('./pretrained_weights/bert/bert-base-uncased/vocab.txt')
         self.multimodal_dim = 768
 
         # VAST
@@ -720,7 +484,7 @@ class VAST(nn.Module):
         return audio_output
 
     def _subtitle_output(self, raw_subtitles):
-        subtitle_tokens = self.multimodal_encoder.tokenizer(
+        subtitle_tokens = self.tokenizer(
             raw_subtitles,
             padding="max_length",
             truncation=True,
@@ -730,8 +494,8 @@ class VAST(nn.Module):
 
         input_ids = subtitle_tokens.input_ids
         attention_mask = subtitle_tokens.attention_mask
-        subtitle_output = self.multimodal_encoder.bert(
+        subtitle_output = self.multimodal_encoder(
             input_ids = input_ids,
             attention_mask = attention_mask,
-        ).last_hidden_state
+        )
         return subtitle_output
