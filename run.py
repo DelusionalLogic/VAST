@@ -76,12 +76,22 @@ def main():
         new_k = new_k.replace(".bert.encoder.layer", ".bert.layer")
         new_k = new_k.replace("multimodal_encoder.bert.", "multimodal_encoder.")
 
+        new_k = new_k.replace("audio_encoder.encoder.layer_norm", "audio_encoder.post_norm")
+        new_k = new_k.replace("audio_encoder.encoder.", "audio_encoder.")
+
+        new_k = new_k.replace(".self_attn.", ".")
+
+        new_k = new_k.replace("audio_encoder.layers.0.relative_attention_bias", "audio_encoder.relative_attention_bias")
+
         if k != new_k:
             replacement.append((k, new_k))
 
     for (k, new_k) in replacement:
         checkpoint[new_k] = checkpoint[k]
         del checkpoint[k]
+
+    for k in [k for k in checkpoint if "audio_encoder.layers." in k and ".relative_attention_bias." in k]:
+            del checkpoint[k]
 
     model.load_state_dict(checkpoint)
     model.to(gpu)

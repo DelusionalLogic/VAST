@@ -1,7 +1,9 @@
+import math
 from functools import (
     partial,
 )
 from typing import (
+    Dict,
     Optional,
     Tuple,
 )
@@ -10,6 +12,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import torchaudio.compliance.kaldi as ta_kaldi
 import torchvision
 from torch import (
     nn,
@@ -21,15 +24,185 @@ from transformers import (
     BertTokenizer,
 )
 
-from .audio_encoders.beats.beats import (
-    BEATs,
-    BEATsConfig,
-)
 from .general_module import (
     Contra_head,
     Match_head,
 )
 
+
+class SamePad(nn.Module):
+    def __init__(self, kernel_size):
+        super().__init__()
+        self.remove = 1 if kernel_size % 2 == 0 else 0
+
+    def forward(self, x):
+        if self.remove > 0:
+            x = x[:, :, : -self.remove]
+        return x
+
+class TransformerSentenceEncoderLayer(nn.Module):
+    def __init__(
+            self,
+            num_attention_heads: float = 8,
+            rescale_init: bool = False,
+    ) -> None:
+
+        super().__init__()
+        self.k_proj = nn.Linear(768, 768)
+        self.v_proj = nn.Linear(768, 768)
+        self.q_proj = nn.Linear(768, 768)
+
+        self.out_proj = nn.Linear(768, 768)
+
+        self.grep_linear = nn.Linear(64, 8)
+        self.grep_a = nn.Parameter(torch.ones(1, 12, 1, 1))
+
+        self.self_attn_layer_norm = nn.LayerNorm(768)
+
+        self.fc1 = nn.Linear(768, 3072)
+        self.fc2 = nn.Linear(3072, 768)
+
+        self.final_layer_norm = nn.LayerNorm(768)
+
+        self.deep_norm_alpha = math.pow(24, 1 / 4)
+
+    def forward(
+            self,
+            x: torch.Tensor,
+            pos_bias,
+    ):
+        residual = x
+
+        tgt_len, bsz, embed_dim = x.size()
+
+        q = self.q_proj(x)
+        k = self.k_proj(x)
+        v = self.v_proj(x)
+
+        q *= 0.125 * 1 / 32
+
+        q = q.view(tgt_len, bsz * 12, 64)
+        q = q.transpose(0, 1)
+
+        k = k.view(-1, bsz * 12, 64)
+        k = k.transpose(0, 1)
+
+        v = v.view(-1, bsz * 12, 64)
+        v = v.transpose(0, 1)
+
+        attn_weights : torch.Tensor = torch.bmm(q, k.transpose(1, 2))
+        attn_weights = (attn_weights - attn_weights.max(dim=-1, keepdim=True)[0]) * 32
+
+        attn_mask_rel_pos = pos_bias
+        query_layer = q.view(bsz, 12, tgt_len, 64) * 32 / 0.125
+        _B, _H, _L, _ = query_layer.size()
+        gate_a, gate_b = torch.sigmoid(self.grep_linear(query_layer).view(_B, _H, _L, 2, 4).sum(-1, keepdim=False)).chunk(2, dim=-1)
+        gate_a_1 = gate_a * (gate_b * self.grep_a - 1.0) + 2.0
+        attn_mask_rel_pos = gate_a_1.view(bsz * 12, tgt_len, 1) * pos_bias
+
+        attn_mask_rel_pos = attn_mask_rel_pos.view(attn_weights.size())
+
+        attn_weights = attn_weights + attn_mask_rel_pos
+
+        attn_weights_float = F.softmax(
+            attn_weights, dim=-1
+        )
+        attn_weights = attn_weights_float.type_as(attn_weights)
+        attn_probs = attn_weights
+
+        assert v is not None
+        attn = torch.bmm(attn_probs, v)
+        assert list(attn.size()) == [bsz * 12, tgt_len, 64]
+        attn = attn.transpose(0, 1).contiguous().view(tgt_len, bsz, embed_dim)
+        attn = self.out_proj(attn)
+
+        x = attn
+
+        x = residual * self.deep_norm_alpha + x
+
+        x = self.self_attn_layer_norm(x)
+
+        residual = x
+        x = torch.nn.functional.gelu(self.fc1(x))
+        x = self.fc2(x)
+        x = residual * self.deep_norm_alpha + x
+        x = self.final_layer_norm(x)
+
+        return x, pos_bias
+
+class BEATs(nn.Module):
+    def __init__(
+            self,
+    ) -> None:
+        super().__init__()
+
+        self.relative_attention_bias = nn.Embedding(320, 12)
+
+        self.patch_embedding = nn.Conv2d(1, 512, kernel_size=16, stride=16, bias=False)
+        self.layer_norm = nn.LayerNorm(512)
+        self.post_extract_proj = nn.Linear(512, 768)
+
+        self.pos_conv = nn.Conv1d(
+            768,
+            768,
+            kernel_size=128,
+            padding=64,
+            groups=16,
+        )
+        self.pos_conv = nn.utils.weight_norm(self.pos_conv, name="weight", dim=2)
+        self.pos_conv = nn.Sequential(self.pos_conv, SamePad(128), nn.GELU())
+
+        self.layers = nn.ModuleList([
+                TransformerSentenceEncoderLayer()
+                for _ in range(12)
+        ])
+
+        self.post_norm = nn.LayerNorm(768)
+
+
+    def forward(self, fbank):
+        fbank = fbank.unsqueeze(1)
+        features = self.patch_embedding(fbank)
+        features = features.reshape(features.shape[0], features.shape[1], -1)
+        features = features.transpose(1, 2)
+        features = self.layer_norm(features)
+
+        features = self.post_extract_proj(features)
+
+        x = features
+        x_conv = self.pos_conv(x.transpose(1, 2))
+        x_conv = x_conv.transpose(1, 2)
+
+        x = x + x_conv
+        x = self.post_norm(x)
+        x = x.transpose(0, 1)
+
+        tgt_len, bsz, _ = x.size()
+        context_position = torch.arange(tgt_len, dtype=torch.long).unsqueeze(1)
+        memory_position = context_position.transpose(0, 1)
+        relative_position = memory_position - context_position
+
+        relative_buckets = (relative_position > 0).to(torch.long) * 160
+        relative_position = torch.abs(relative_position)
+
+        is_small = relative_position < 80
+
+        relative_postion_if_large = 80 + (torch.log(relative_position.float() / 80) / math.log(10) * (160 - 80)).to(torch.long)
+        relative_postion_if_large = torch.min(
+            relative_postion_if_large, torch.full_like(relative_postion_if_large, 159)
+        )
+        relative_buckets += torch.where(is_small, relative_position, relative_postion_if_large)
+
+        relative_position_bucket = relative_buckets.to(self.relative_attention_bias.weight.device)
+        values = self.relative_attention_bias(relative_position_bucket)
+        pos_bias = values.permute([2, 0, 1])
+
+        pos_bias = pos_bias.unsqueeze(0).repeat(bsz, 1, 1, 1).view(bsz * 12, tgt_len, tgt_len)
+
+        for layer in self.layers:
+            x, pos_bias = layer(x, pos_bias)
+
+        return x.transpose(0, 1)
 
 class BertLayer(nn.Module):
     def __init__(self):
@@ -356,9 +529,7 @@ class VAST(nn.Module):
         self.vision_dim = 1408
 
         # BEATS
-        cfg = BEATsConfig()
-
-        self.audio_encoder = BEATs(cfg)
+        self.audio_encoder = BEATs()
         self.audio_dim = 768
 
         # BERT
