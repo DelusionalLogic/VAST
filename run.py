@@ -93,6 +93,9 @@ def main():
 
         new_k = new_k.replace("audio_encoder.pos_conv.0.", "audio_encoder.pos_conv.")
 
+        new_k = new_k.replace(".final_layer_norm.", ".output_norm.")
+        new_k = new_k.replace(".self_attn_layer_norm.", ".attention_norm.")
+
         if k != new_k:
             replacement.append((k, new_k))
 
