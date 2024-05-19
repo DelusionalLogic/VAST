@@ -3,42 +3,20 @@ from functools import (
     partial,
 )
 from typing import (
-    Dict,
     Optional,
     Tuple,
 )
 
 import numpy as np
 import torch
-import torch.nn as nn
-import torch.nn.functional as F
-import torchaudio.compliance.kaldi as ta_kaldi
 import torchvision
 from torch import (
     nn,
-)
-from torch.nn.init import (
-    trunc_normal_,
 )
 from transformers import (
     BertTokenizer,
 )
 
-from .general_module import (
-    Contra_head,
-    Match_head,
-)
-
-
-class SamePad(nn.Module):
-    def __init__(self, kernel_size):
-        super().__init__()
-        self.remove = 1 if kernel_size % 2 == 0 else 0
-
-    def forward(self, x):
-        if self.remove > 0:
-            x = x[:, :, : -self.remove]
-        return x
 
 class TransformerSentenceEncoderLayer(nn.Module):
     def __init__(
@@ -104,7 +82,7 @@ class TransformerSentenceEncoderLayer(nn.Module):
 
         attn_weights = attn_weights + attn_mask_rel_pos
 
-        attn_weights_float = F.softmax(
+        attn_weights_float = nn.functional.softmax(
             attn_weights, dim=-1
         )
         attn_weights = attn_weights_float.type_as(attn_weights)
@@ -150,7 +128,6 @@ class BEATs(nn.Module):
             groups=16,
         )
         self.pos_conv = nn.utils.weight_norm(self.pos_conv, name="weight", dim=2)
-        self.pos_conv = nn.Sequential(self.pos_conv, SamePad(128), nn.GELU())
 
         self.layers = nn.ModuleList([
                 TransformerSentenceEncoderLayer()
@@ -170,7 +147,7 @@ class BEATs(nn.Module):
         features = self.post_extract_proj(features)
 
         x = features
-        x_conv = self.pos_conv(x.transpose(1, 2))
+        x_conv = nn.functional.gelu(self.pos_conv(x.transpose(1, 2))[:,:,:-1])
         x_conv = x_conv.transpose(1, 2)
 
         x = x + x_conv
@@ -315,7 +292,7 @@ class Attention(nn.Module):
         qkv_bias = torch.cat((self.q_bias, torch.zeros_like(self.v_bias, requires_grad=False), self.v_bias))
         # print('xshape',x.shape)
         # print('weight_shape',self.qkv.weight.shape)
-        qkv = F.linear(input=x, weight=self.qkv.weight, bias=qkv_bias)
+        qkv = nn.functional.linear(input=x, weight=self.qkv.weight, bias=qkv_bias)
         qkv = qkv.reshape(B, N, 3, self.num_heads, -1).permute(2, 0, 3, 1, 4)   # 3, B, num_heads, N, C
         q, k, v = qkv[0], qkv[1], qkv[2]
 
@@ -428,13 +405,13 @@ class EVAVisionTransformer(nn.Module):
         self.norm = norm_layer(embed_dim)
         self.fc_norm = None
         self.head = nn.Linear(embed_dim, self.num_classes)
-        trunc_normal_(self.head.weight, std=.02)
-        self.head.weight.data.mul_(init_scale)
-        self.head.bias.data.mul_(init_scale)
+        # trunc_normal_(self.head.weight, std=.02)
+        # self.head.weight.data.mul_(init_scale)
+        # self.head.bias.data.mul_(init_scale)
 
-        trunc_normal_(self.pos_embed, std=.02)
+        # trunc_normal_(self.pos_embed, std=.02)
 
-        trunc_normal_(self.cls_token, std=.02)
+        # trunc_normal_(self.cls_token, std=.02)
         # trunc_normal_(self.mask_token, std=.02)
 
     def forward_features(self, x):
@@ -475,7 +452,7 @@ class CustomCLIP(nn.Module):
 
     def encode_image(self, image):
         features = self.visual(image)
-        return F.normalize(features, dim=-1)
+        return nn.functional.normalize(features, dim=-1)
 
 class VastTextEncoder(nn.Module):
     def __init__(self, config):
@@ -487,7 +464,7 @@ class VastTextEncoder(nn.Module):
         self.tokenizer = BertTokenizer('./pretrained_weights/bert/bert-base-uncased/vocab.txt')
 
         # VAST
-        self.contra_head_t = Contra_head(768, self.config.contra_dim)
+        self.contra_head_t = nn.Linear(768, self.config.contra_dim, bias=False)
 
     def _caption_tokens(self, raw_captions):
         caption_tokens = self.tokenizer(
@@ -512,7 +489,7 @@ class VastTextEncoder(nn.Module):
 
         caption_output_pooled = caption_output[:,0]
         feat_t = self.contra_head_t(caption_output_pooled) 
-        feat_t = F.normalize(feat_t, dim=-1)
+        feat_t = nn.functional.normalize(feat_t, dim=-1)
         return feat_t
 
 class VAST(nn.Module):
@@ -539,15 +516,20 @@ class VAST(nn.Module):
 
         # VAST
         contra_dim = self.config.contra_dim
-        self.contra_head_t = Contra_head(self.multimodal_dim, contra_dim) # This should be unused
-        self.contra_head_s = Contra_head(self.multimodal_dim, contra_dim)
-        self.contra_head_v = Contra_head(self.vision_dim, contra_dim)
-        self.contra_head_a = Contra_head(self.audio_dim, contra_dim)
+        self.contra_head_t = nn.Linear(self.multimodal_dim, contra_dim, bias=False) # This should be unused
+        self.contra_head_s = nn.Linear(self.multimodal_dim, contra_dim, bias=False)
+        self.contra_head_v = nn.Linear(self.vision_dim, contra_dim, bias=False)
+        self.contra_head_a = nn.Linear(self.audio_dim, contra_dim, bias=False)
         self.contra_head_va = nn.Linear(self.vision_dim + self.audio_dim, contra_dim)
         self.contra_head_vs = nn.Linear(self.vision_dim + self.multimodal_dim, contra_dim)
         self.contra_head_vas = nn.Linear(self.vision_dim + self.audio_dim + self.multimodal_dim, contra_dim)
         self.contra_temp = nn.Parameter(torch.tensor(0.07))
-        self.itm_head = Match_head(self.multimodal_dim)
+        self.itm_head = nn.Sequential(
+            nn.Linear(self.multimodal_dim, self.multimodal_dim),
+            nn.GELU(),
+            nn.LayerNorm(self.multimodal_dim, eps=1e-12),
+            nn.Linear(self.multimodal_dim, 2),
+        )
         self.vision_frame_embedding = nn.Parameter(0.02 * torch.randn(1, self.config.max_vision_sample_num, self.multimodal_dim))
         self.audio_frame_embedding = nn.Parameter(0.02 * torch.randn(1, self.config.max_audio_sample_num, self.multimodal_dim))
         self.hidden_trans_vision_multimodal = nn.Sequential(nn.Linear(self.vision_dim, self.multimodal_dim),nn.LayerNorm(self.multimodal_dim, eps=1e-12))
@@ -592,7 +574,7 @@ class VAST(nn.Module):
         b,n,x,c = vision_output.shape
         vision_output = self.hidden_trans_vision_multimodal(vision_output)  
 
-        vision_frame_embedding = F.interpolate(self.vision_frame_embedding.float().permute(0, 2, 1), n, mode='nearest').permute(0, 2, 1).to(self.vision_frame_embedding)
+        vision_frame_embedding = nn.functional.interpolate(self.vision_frame_embedding.float().permute(0, 2, 1), n, mode='nearest').permute(0, 2, 1).to(self.vision_frame_embedding)
         vision_output = vision_output + vision_frame_embedding.unsqueeze(-2)
         vision_output = vision_output.reshape(b, -1, self.multimodal_dim) 
         vision_output = vision_output + self.vision_type_embeddings
@@ -603,7 +585,7 @@ class VAST(nn.Module):
         b,n,x,c = audio_output.shape
 
         if n!= self.audio_frame_embedding.shape[1]: #### testing and interpolate
-            audio_frame_embedding = F.interpolate(self.audio_frame_embedding.permute(0,2,1),n,mode='nearest').permute(0,2,1)
+            audio_frame_embedding = nn.functional.interpolate(self.audio_frame_embedding.permute(0,2,1),n,mode='nearest').permute(0,2,1)
         else:
             audio_frame_embedding = self.audio_frame_embedding
         audio_output = self.hidden_trans_audio_multimodal(audio_output)
@@ -625,7 +607,7 @@ class VAST(nn.Module):
 
         feat_vas = torch.cat((vision_output_pooled, audio_output_pooled, subtitle_output_pooled), dim=1)
         feat_vas = self.contra_head_vas(feat_vas)
-        feat_vas = F.normalize(feat_vas,dim=-1)
+        feat_vas = nn.functional.normalize(feat_vas,dim=-1)
 
         return feat_vas
 

@@ -82,6 +82,16 @@ def main():
         new_k = new_k.replace(".self_attn.", ".")
 
         new_k = new_k.replace("audio_encoder.layers.0.relative_attention_bias", "audio_encoder.relative_attention_bias")
+        new_k = new_k.replace("itm_head.linear1", "itm_head.0")
+        new_k = new_k.replace("itm_head.layernorm", "itm_head.2")
+        new_k = new_k.replace("itm_head.linear2", "itm_head.3")
+
+        new_k = new_k.replace("contra_head_t.linear.", "contra_head_t.")
+        new_k = new_k.replace("contra_head_s.linear.", "contra_head_s.")
+        new_k = new_k.replace("contra_head_v.linear.", "contra_head_v.")
+        new_k = new_k.replace("contra_head_a.linear.", "contra_head_a.")
+
+        new_k = new_k.replace("audio_encoder.pos_conv.0.", "audio_encoder.pos_conv.")
 
         if k != new_k:
             replacement.append((k, new_k))
