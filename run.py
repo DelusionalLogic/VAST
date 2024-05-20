@@ -1,4 +1,7 @@
+import random
+
 import coverage
+import numpy as np
 import torch
 from torch.utils.data import (
     DataLoader,
@@ -15,16 +18,6 @@ from model.vast import (
     VAST,
     VastTextEncoder,
 )
-from utils.args import (
-    get_args,
-    logging_cfgs,
-)
-from utils.build_dataloader import (
-    create_val_dataloaders,
-)
-from utils.initialize import (
-    initialize,
-)
 
 
 def main():
@@ -32,19 +25,17 @@ def main():
     # cov = coverage.Coverage()
     # cov.start()
 
-    ### init 
-    args = get_args()
-    initialize(args)
-
-    ### logging cfgs
-    logging_cfgs(args)
+    random.seed(50)
+    np.random.seed(50)
+    torch.manual_seed(50)
+    torch.cuda.manual_seed_all(50)
+    torch.backends.cudnn.benchmark = True
 
     gpu = torch.device("cuda")
 
-    assert args.run_cfg.checkpoint
     ### build model
-    model = VAST(args.model_cfg)
-    checkpoint = torch.load(args.run_cfg.checkpoint)
+    model = VAST()
+    checkpoint = torch.load("output/vast/pretrain_vast/downstream/retrieval-msrvtt/ckpt/model_step_10109.pt")
     # checkpoint["position_ids"] = checkpoint["multimodal_encoder.bert.embeddings.position_ids"]
     # del checkpoint["multimodal_encoder.bert.embeddings.position_ids"]
     for k in [k for k in checkpoint if "vision_encoder.text" in k]:
@@ -110,7 +101,7 @@ def main():
     model.to(gpu)
     model.eval()
 
-    text_model = VastTextEncoder(args.model_cfg)
+    text_model = VastTextEncoder()
     text_model.load_state_dict(checkpoint, strict=False)
     text_model.to(gpu)
     text_model.eval()

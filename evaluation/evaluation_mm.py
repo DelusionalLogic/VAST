@@ -24,7 +24,8 @@ def evaluate_ret(model, text_model, video_loader, caption_loader):
 
         vision = model._vision_output(batch["vision_pixels"])
         audio = model._audio_output(batch["audio_spectrograms"])
-        subtitle = torch.zeros(len(batch["ids"]), 1, 768).cuda()
+        # subtitle = torch.zeros(len(batch["ids"]), 1, 768).cuda()
+        subtitle = model._subtitle_output(batch["raw_subtitles"])
         feat_cond.append(model._feat_vas(vision, audio, subtitle))
 
     assert caption_ids == video_ids

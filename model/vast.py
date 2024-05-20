@@ -436,23 +436,21 @@ class CustomCLIP(nn.Module):
         return nn.functional.normalize(features, dim=-1)
 
 class VastTextEncoder(nn.Module):
-    def __init__(self, config):
+    def __init__(self):
         super().__init__()
-
-        self.config = config
 
         self.multimodal_encoder = BertModel()
         self.tokenizer = BertTokenizer('./pretrained_weights/bert/bert-base-uncased/vocab.txt')
 
         # VAST
-        self.contra_head_t = nn.Linear(768, self.config.contra_dim, bias=False)
+        self.contra_head_t = nn.Linear(768, 512, bias=False)
 
     def _caption_tokens(self, raw_captions):
         caption_tokens = self.tokenizer(
             raw_captions,
             padding="max_length",
             truncation=True,
-            max_length=self.config.max_caption_len,
+            max_length=70,
             return_tensors="pt"
         ).to(torch.device("cuda"))
         return caption_tokens
@@ -475,14 +473,12 @@ class VastTextEncoder(nn.Module):
 
 class VAST(nn.Module):
     """ VLP pretraining """
-    def __init__(self, config):
+    def __init__(self):
         super().__init__()
-
-        self.config = config
 
         # CLIP
         self.vision_encoder = CustomCLIP(
-            image_size=self.config.vision_resolution,
+            image_size=224,
         )
         self.vision_dim = 1408
 
@@ -496,7 +492,7 @@ class VAST(nn.Module):
         self.multimodal_dim = 768
 
         # VAST
-        contra_dim = self.config.contra_dim
+        contra_dim = 512
         self.contra_head_t = nn.Linear(self.multimodal_dim, contra_dim, bias=False) # This should be unused
         self.contra_head_s = nn.Linear(self.multimodal_dim, contra_dim, bias=False)
         self.contra_head_v = nn.Linear(self.vision_dim, contra_dim, bias=False)
@@ -511,15 +507,15 @@ class VAST(nn.Module):
             nn.LayerNorm(self.multimodal_dim, eps=1e-12),
             nn.Linear(self.multimodal_dim, 2),
         )
-        self.vision_frame_embedding = nn.Parameter(0.02 * torch.randn(1, self.config.max_vision_sample_num, self.multimodal_dim))
-        self.audio_frame_embedding = nn.Parameter(0.02 * torch.randn(1, self.config.max_audio_sample_num, self.multimodal_dim))
+        self.vision_frame_embedding = nn.Parameter(0.02 * torch.randn(1, 8, self.multimodal_dim))
+        self.audio_frame_embedding = nn.Parameter(0.02 * torch.randn(1, 1, self.multimodal_dim))
         self.hidden_trans_vision_multimodal = nn.Sequential(nn.Linear(self.vision_dim, self.multimodal_dim),nn.LayerNorm(self.multimodal_dim, eps=1e-12))
         self.hidden_trans_audio_multimodal = nn.Sequential(nn.Linear(self.audio_dim, self.multimodal_dim),nn.LayerNorm(self.multimodal_dim, eps=1e-12))
         self.hidden_trans_subtitle_multimodal = nn.Sequential(nn.Linear(self.multimodal_dim, self.multimodal_dim),nn.LayerNorm(self.multimodal_dim, eps=1e-12))
         self.vision_type_embeddings = nn.Parameter(0.02 * torch.randn(1, 1, self.multimodal_dim)) 
         self.audio_type_embeddings = nn.Parameter(0.02 * torch.randn(1, 1, self.multimodal_dim)) 
         self.subtitle_type_embeddings = nn.Parameter(0.02 * torch.randn(1, 1, self.multimodal_dim)) 
-        self.max_subtitle_len = config.max_subtitle_len
+        self.max_subtitle_len = 70
 
     def pool_vision_for_contra(self, feature):
         # always use frame_avg for retrieval
